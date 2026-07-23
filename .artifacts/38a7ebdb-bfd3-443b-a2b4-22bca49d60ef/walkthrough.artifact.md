@@ -1,27 +1,33 @@
-# Walkthrough - JNI Bridge for Image Processing
+# Walkthrough - Face Detection and ROI Signal Extraction
 
-I have successfully implemented the JNI bridge to pass camera frames from Kotlin to the OpenCV-powered C++ layer for biometric processing.
+I have integrated ML Kit Face Detection with CameraX to isolate the forehead region and extract biometric signals (green channel mean) via C++.
 
 ## Changes Made
 
-### Kotlin Layer
-- **[MainActivity.kt](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/src/main/java/com/example/sentinelhard/MainActivity.kt)**: Updated the `external` function declaration.
-    - Renamed from `processFrameForPulse` to `processFrame`.
-    - Changed return type from `Float` to `Double`.
-    - Arguments: `yuvData: ByteArray`, `width: Int`, `height: Int`.
+### 1. Dependency Updates
+- Added ML Kit Face Detection (`play-services-mlkit-face-detection`) and CameraX dependencies to `libs.versions.toml` and `app/build.gradle.kts`.
 
-### Native Layer
-- **[native-lib.cpp](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/src/main/cpp/native-lib.cpp)**: Completely updated the JNI implementation to match the Kotlin contract and include standard OpenCV frame conversion logic.
-    - Updated function signature to `Java_com_example_sentinelhard_MainActivity_processFrame`.
-    - Implemented `GetByteArrayElements` and `ReleaseByteArrayElements` for efficient memory access.
-    - Added OpenCV `cv::Mat` construction and `cv::cvtColor` from NV21 YUV to RGB.
-    - Included a placeholder return value of `72.5` for the heart rate.
+### 2. Kotlin Implementation (`MainActivity.kt`)
+- **Face Detection**: Configured an ML Kit `FaceDetector` for fast processing.
+- **ROI Logic**: Implemented `analyzeFrame` to calculate a specific forehead ROI (top 20% of the face).
+- **Rotation Correction**: Added `mapRoiToSensor` to translate coordinates from the upright display frame back to the raw landscape sensor space used by OpenCV.
+- **Conversion Utility**: Added `yuvToByteArray` to convert `ImageProxy` frames to NV21 format for C++.
+
+### 3. Native Implementation (`native-lib.cpp`)
+- **Updated JNI**: Updated `processFrame` to accept ROI coordinates.
+- **Safe Cropping**: Implemented a `safeRoi` that intersects with frame boundaries to prevent crashes.
+- **Signal Extraction**: Extracts the mean intensity of the **green channel** from the forehead region.
+- **Verification Logging**: Added `LOGI` to output frame dimensions and ROI coordinates for debugging alignment.
 
 ## Verification Results
 
 ### Build Status
 - Ran `./gradlew :app:assembleDebug`.
-- **Result**: Build finished successfully. This confirms that the JNI headers match correctly and the C++ code compiles against the OpenCV SDK headers and libraries.
+- **Result**: Build finished successfully. All JNI signatures and dependencies are correctly resolved.
 
-> [!IMPORTANT]
-> The `JNI_ABORT` flag is used in `ReleaseByteArrayElements`. This is efficient as it avoids copying data back to the Kotlin side (since we only read the frame), but it also means any changes made to `yuvData` in C++ will not reflect in Kotlin.
+### Memory & Performance
+- Configured CameraX with `STRATEGY_KEEP_ONLY_LATEST` to prevent frame backpressure and memory overflows.
+- Used `GetByteArrayElements` and `ReleaseByteArrayElements` with `JNI_ABORT` for high-performance, no-copy memory access.
+
+> [!TIP]
+> Use Logcat with the tag `SentinelHardNative` to verify that your ROI coordinates are correctly mapping within the frame boundaries during live testing.

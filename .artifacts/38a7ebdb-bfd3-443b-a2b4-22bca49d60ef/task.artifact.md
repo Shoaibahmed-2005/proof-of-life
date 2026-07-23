@@ -1,3 +1,5 @@
-- [x] Update `processFrame` declaration in `MainActivity.kt`
-- [x] Update `processFrame` implementation in `native-lib.cpp`
+- [x] Add ML Kit and CameraX dependencies to `libs.versions.toml` and `app/build.gradle.kts`
+- [x] Update JNI signature and implement face detection in `MainActivity.kt`
+- [x] Implement `YuvToByteArray` in `MainActivity.kt`
+- [x] Update JNI implementation in `native-lib.cpp` to handle ROI and green channel mean
 - [x] Verify build with `./gradlew :app:assembleDebug`
