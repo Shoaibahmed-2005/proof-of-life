@@ -1,5 +1,6 @@
-- [x] Add ML Kit and CameraX dependencies to `libs.versions.toml` and `app/build.gradle.kts`
-- [x] Update JNI signature and implement face detection in `MainActivity.kt`
-- [x] Implement `YuvToByteArray` in `MainActivity.kt`
-- [x] Update JNI implementation in `native-lib.cpp` to handle ROI and green channel mean
+- [x] Implement `extractVitals` DSP math in `native-lib.cpp` (DTFT & SNR)
+- [x] Implement `extractHeartMetrics` JNI function in `native-lib.cpp`
+- [x] Update `MainActivity.kt` JNI declaration for `extractHeartMetrics`
+- [x] Implement HUD UI overlay in `MainActivity.kt` (BPM, SNR, Liveness badge)
+- [x] Integrate metrics extraction into `analyzeFrame` in `MainActivity.kt`
 - [x] Verify build with `./gradlew :app:assembleDebug`
