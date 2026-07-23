@@ -1,0 +1,8 @@
+lib/arm64-v8a/libopencv_java4.so->Project
+lib/armeabi-v7a/libopencv_java4.so->Project
+lib/x86/libopencv_java4.so->Project
+lib/x86_64/libopencv_java4.so->Project
+lib/armeabi-v7a\libc++_shared.so->Project
+lib/arm64-v8a\libc++_shared.so->Project
+lib/x86\libc++_shared.so->Project
+lib/x86_64\libc++_shared.so->Project

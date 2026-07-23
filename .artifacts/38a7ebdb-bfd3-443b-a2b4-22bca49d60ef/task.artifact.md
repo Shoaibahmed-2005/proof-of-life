@@ -1,0 +1,3 @@
+- [x] Update `processFrame` declaration in `MainActivity.kt`
+- [x] Update `processFrame` implementation in `native-lib.cpp`
+- [x] Verify build with `./gradlew :app:assembleDebug`
