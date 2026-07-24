@@ -1,42 +1,42 @@
-# Final Step: Camera Integration & Hardware Deployment
+# Phase 12: Final Optimizations & Bug Fixes
 
-To test the biometric monitor "right now" on a physical device, we need to finalize the CameraX integration. This will pipe live frames from your phone's camera into the face detector and rPPG engine we've built.
+This plan implements critical refactorings to fix ROI rotation bugs, prevent memory leaks, correct Gradle DSL syntax, and stabilize the native signal processing engine for the IOB Cybernova hackathon.
 
 ## Proposed Changes
 
-### Manifest & Permissions
+### Build Configuration
 
-#### [MODIFY] [AndroidManifest.xml](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/src/main/AndroidManifest.xml)
-- Add the `CAMERA` permission and hardware feature requirements.
+#### [MODIFY] [app/build.gradle.kts](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/build.gradle.kts)
+- Correct invalid DSL syntax for `compileSdk` and `buildTypes`.
+- Change `compileSdk { version = release(35) }` to `compileSdk = 35`.
+- Change `optimization { enable = false }` to `isMinifyEnabled = false`.
 
-### Kotlin Layer
+### Kotlin Layer (`MainActivity.kt`)
 
 #### [MODIFY] [MainActivity.kt](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/src/main/java/com/example/sentinelhard/MainActivity.kt)
-- **Permission Request**: Add code to check and request camera permissions at runtime.
-- **CameraX Setup**:
-    - Initialize `ProcessCameraProvider`.
-    - Configure `Preview` use case.
-    - Configure `ImageAnalysis` with `STRATEGY_KEEP_ONLY_LATEST` and bind it to our `analyzeFrame` logic.
-- **Compose UI Update**:
-    - Use `AndroidView` to embed the CameraX `PreviewView`.
-    - Layout the `CameraPreview` as the bottom layer, with the `HUDOverlay` on top.
+- **Fix Rotation Bug**: Update `mapRoiToSensor` for 90° and 270° cases.
+    - 90°: `intArrayOf(y, imgH - x - w, h, w)`
+    - 270°: `intArrayOf(imgW - y - h, x, h, w)`
+- **Memory Management**: Add `onDestroy()` lifecycle method to shut down `cameraExecutor` and close the ML Kit `detector`.
+- **API Modernization**:
+    - Replace deprecated `setTargetResolution` with `ResolutionSelector`.
+    - Replace `@SuppressLint("UnsafeOptInUsageError")` with `@OptIn(ExperimentalGetImage::class)`.
+
+### Native Layer (`native-lib.cpp`)
+
+#### [MODIFY] [native-lib.cpp](file:///C:/Users/praji/AndroidStudioProjects/SentinelHard/app/src/main/cpp/native-lib.cpp)
+- **Fix Resampling Drift**: Update `resampleToUniform` to use an integer-based sample-count loop instead of a floating-point increment loop to prevent cumulative rounding errors.
+- **Strict Liveness Logic**:
+    - Port exact RMS Signal Power check from web logic (`signalPower < 0.10`).
+    - Port Peak-to-Noise Ratio (Quality Ratio) check from web logic (`qualityRatio < 1.5`).
+    - Ensure all spoof detections log specific failure reasons to Logcat.
 
 ## Verification Plan
 
 ### Automated Tests
-- Run `./gradlew :app:assembleDebug` to ensure all imports and use cases are correctly configured.
+- Run `./gradlew :app:assembleDebug` to verify compilation and DSL correctness.
 
-### Manual Verification (The Test)
-1. **Deploy**: Plug in a physical Android device and run the app.
-2. **Permission**: Grant camera permission when prompted.
-3. **Detection**: Point the camera at your face.
-    - The green waveform should begin scrolling at the bottom.
-    - After ~2 seconds, the **BPM** and **SNR** values should populate.
-    - The badge should switch to **VERIFIED HUMAN**.
-4. **Spoof Test**: Point the camera at a photo of a face.
-    - Observe the **SNR** drop and the badge switch to **SPOOF DETECTED**.
-
-## User Review Required
-
-> [!IMPORTANT]
-> A physical device is **strongly recommended** for testing. Emulators often have simulated camera feeds that lack the subtle color fluctuations (photoplethysmogram) required for the C++ engine to calculate an accurate heart rate.
+### Manual Verification
+- **Rotation Test**: Verify that the forehead ROI tracks correctly in both Portrait and Landscape orientations.
+- **Leak Test**: Open and close the app multiple times to ensure no camera or detector memory leaks occur.
+- **Spoof Integrity**: Confirm binary "Verified" vs "Spoof" decisions align with the strict web thresholds.

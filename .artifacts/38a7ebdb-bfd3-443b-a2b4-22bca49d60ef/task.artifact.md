@@ -1,6 +1,4 @@
-- [x] Implement `extractVitals` DSP math in `native-lib.cpp` (DTFT & SNR)
-- [x] Implement `extractHeartMetrics` JNI function in `native-lib.cpp`
-- [x] Update `MainActivity.kt` JNI declaration for `extractHeartMetrics`
-- [x] Implement HUD UI overlay in `MainActivity.kt` (BPM, SNR, Liveness badge)
-- [x] Integrate metrics extraction into `analyzeFrame` in `MainActivity.kt`
+- [x] Reduce `signalPower` threshold in `native-lib.cpp`
+- [x] Add diagnostic logging for raw signal metrics in `native-lib.cpp`
+- [x] Refine liveness hysteresis in `MainActivity.kt`
 - [x] Verify build with `./gradlew :app:assembleDebug`

@@ -5,9 +5,7 @@ plugins {
 
 android {
     namespace = "com.example.sentinelhard"
-    compileSdk {
-        version = release(35)
-    }
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.sentinelhard"
@@ -26,6 +24,7 @@ android {
                 // arguments += "-DOpenCV_DIR=${project.rootDir}/opencv/sdk/native/jni"
                 // --- ADD THIS LINE ---
                 abiFilters += setOf("arm64-v8a", "armeabi-v7a")
+                arguments += "-DANDROID_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
             }
         }
 
@@ -34,9 +33,7 @@ android {
 
     buildTypes {
         release {
-            optimization {
-                enable = false
-            }
+            isMinifyEnabled = false
         }
     }
     compileOptions {
