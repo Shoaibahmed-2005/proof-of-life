@@ -1,5 +1,5 @@
 {
-  "installationFolder": "C:\\Users\\praji\\AndroidStudioProjects\\SentinelHard\\sdk\\build\\intermediates\\prefab_package\\debug\\prefab",
+  "installationFolder": "C:\\Users\\praji\\Desktop\\projrct\\SentinelHard\\sdk\\build\\intermediates\\prefab_package\\debug\\prefab",
   "gradlePath": ":opencv",
   "packageInfo": {
     "packageName": "opencv",
@@ -8,7 +8,7 @@
     "modules": [
       {
         "moduleName": "opencv_jni_shared",
-        "moduleHeaders": "C:\\Users\\praji\\AndroidStudioProjects\\SentinelHard\\sdk\\native\\jni\\include",
+        "moduleHeaders": "C:\\Users\\praji\\Desktop\\projrct\\SentinelHard\\sdk\\native\\jni\\include",
         "moduleExportLibraries": [],
         "abis": []
       }
