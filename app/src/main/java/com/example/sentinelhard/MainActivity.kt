@@ -3,10 +3,11 @@ package com.example.sentinelhard
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.PointF
+import android.graphics.RectF
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
-import android.util.Size
+import android.util.Size as AndroidSize
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -33,6 +34,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size as ComposeSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
@@ -54,6 +57,11 @@ class MainActivity : AppCompatActivity() {
     private val bufferSizeState = mutableStateOf(0.0)
     private val isFaceDetectedState = mutableStateOf(false)
     private val isAnalysisReadyState = mutableStateOf(false)
+
+    // ROI debug overlay state
+    private val foreheadRoiState = mutableStateOf<RectF?>(null)
+    private val roiImageWidth = mutableIntStateOf(0)
+    private val roiImageHeight = mutableIntStateOf(0)
 
     private val livenessHistory = mutableListOf<Int>()
     private val LIVENESS_SMOOTHING_WINDOW = 15
@@ -77,6 +85,17 @@ class MainActivity : AppCompatActivity() {
     private var hasFaceLost = false
 
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val telemetryStreamer = TelemetryStreamer()
+    private var telemetryFrameCounter = 0
+
+    // Thermal optimization: throttle to 20 FPS
+    private var lastProcessedTimeMs = 0L
+    private val frameIntervalMs = 50L  // 1000 / 20 FPS
+
+    // Decoupled face detection: run ML Kit every 3rd frame, JNI every frame
+    private var mlKitFrameCounter = 0
+    @Volatile private var isDetectingFace = false
+    private val ML_KIT_INTERVAL = 3
 
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
@@ -116,6 +135,7 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         CameraPreview(modifier = Modifier.fillMaxSize())
+                        ForeheadRoiOverlay()
                         HUDOverlay()
                     }
                 }
@@ -141,7 +161,7 @@ class MainActivity : AppCompatActivity() {
                     val resolutionSelector = ResolutionSelector.Builder()
                         .setResolutionStrategy(
                             ResolutionStrategy(
-                                Size(640, 480),
+                                AndroidSize(640, 480),
                                 ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                             )
                         )
@@ -283,6 +303,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Composable
+    fun ForeheadRoiOverlay() {
+        val roiRect by foreheadRoiState
+        val imgWidth by roiImageWidth
+        val imgHeight by roiImageHeight
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val rect = roiRect ?: return@Canvas
+            if (imgWidth == 0 || imgHeight == 0) return@Canvas
+
+            val scaleX = size.width / imgWidth.toFloat()
+            val scaleY = size.height / imgHeight.toFloat()
+
+            // Mirror X-axis for front-facing camera
+            val left = size.width - rect.right * scaleX
+            val right = size.width - rect.left * scaleX
+            val top = rect.top * scaleY
+            val bottom = rect.bottom * scaleY
+
+            drawRect(
+                color = Color(0xFF00FF66),
+                topLeft = Offset(left, top),
+                size = ComposeSize(right - left, bottom - top),
+                style = Stroke(width = 4f)
+            )
+        }
+    }
+
+    @Composable
     fun MetricItem(label: String, value: String, unit: String, color: Color) {
         Column {
             Text(text = label, color = color.copy(alpha = 0.7f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -334,146 +382,198 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Processes heart metrics from the C++ pipeline and updates all UI/telemetry state.
+     * Extracted to avoid duplication between ML Kit and cached-ROI frame paths.
+     */
+    private fun processMetrics() {
+        val metrics = extractHeartMetrics()
+        if (metrics.size == 4) {
+            bpmState.value = metrics[0]
+            snrState.value = metrics[1]
+
+            // Liveness Hysteresis with Tiered Status (0, 1, 2)
+            val rawStatus = metrics[2].toInt()
+
+            // Apply Micro-Motion Override
+            val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
+
+            livenessHistory.add(finalRawStatus)
+            if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
+
+            // Bug 2 Fix: Gate voting behind warmup window
+            val votedStatus = if (livenessHistory.size < LIVENESS_SMOOTHING_WINDOW) {
+                1 // Force ANALYZING during warmup
+            } else {
+                livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
+            }
+
+            // UX Dwell-Time Filter
+            if (votedStatus != displayedStatus) {
+                pendingStatusFrames++
+                if (pendingStatusFrames >= MIN_DWELL_FRAMES) {
+                    displayedStatus = votedStatus
+                    pendingStatusFrames = 0
+                }
+            } else {
+                pendingStatusFrames = 0
+            }
+            livenessStatusState.intValue = displayedStatus
+
+            bufferSizeState.value = metrics[3]
+            // One-way latch: lock UI into Metrics view once buffer is primed
+            if (!isAnalysisReadyState.value && metrics[3] >= 150.0) {
+                isAnalysisReadyState.value = true
+            }
+
+            Log.i("SentinelTelemetry",
+                "Buffer: ${metrics[3].toInt()}/150 | " +
+                "Status: $displayedStatus | " +
+                "SNR: ${String.format("%.2f", metrics[1])} dB"
+            )
+
+            // Stream telemetry to server (~1 message/sec at 20 FPS)
+            telemetryFrameCounter++
+            if (telemetryFrameCounter >= 20) {
+                telemetryStreamer.sendTelemetry(
+                    bpm = metrics[0],
+                    snr = metrics[1],
+                    livenessStatus = displayedStatus
+                )
+                telemetryFrameCounter = 0
+            }
+        }
+    }
+
     @OptIn(ExperimentalGetImage::class)
     fun analyzeFrame(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image ?: return
+        // Temporal downsampling: skip frames beyond 20 FPS to reduce CPU/thermal load
+        val currentTimeMs = System.currentTimeMillis()
+        if (currentTimeMs - lastProcessedTimeMs < frameIntervalMs) {
+            imageProxy.close()
+            return
+        }
+        lastProcessedTimeMs = currentTimeMs
+
+        val mediaImage = imageProxy.image
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
+        }
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-        val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
         val timestampSeconds = imageProxy.imageInfo.timestamp / 1_000_000_000.0
 
-        detector.process(image)
-            .addOnSuccessListener { faces ->
-                if (faces.isNotEmpty()) {
-                    coastingFrames = 0
-                    hasFaceLost = false  // clear after face re-detected
-                    isFaceDetectedState.value = true
-                    
-                    val face = faces.first()
+        // Copy YUV data while proxy is open (independent of proxy after this)
+        val yuvData = yuvToByteArray(imageProxy)
+        val imgWidth = imageProxy.width
+        val imgHeight = imageProxy.height
 
-                    // --- Layer 3: ML Kit Micro-Motion Tracking ---
-                    val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
-                    if (noseBase != null) {
-                        if (nosePositions.size == 15) nosePositions.removeFirst()
-                        nosePositions.addLast(noseBase)
+        // === JNI Processing: runs EVERY frame with cached ROI ===
+        // This gives the C++ POS/FFT pipeline a continuous 20 FPS signal
+        // even though ML Kit face detection only runs at ~7 FPS.
+        val roi = lastGoodRoi
+        if (roi != null && isFaceDetectedState.value && !hasFaceLost) {
+            signalState.value = processFrame(
+                yuvData, lastGoodWidth, lastGoodHeight,
+                roi[0], roi[1], roi[2], roi[3],
+                timestampSeconds
+            )
+            processMetrics()
+        }
 
-                        if (nosePositions.size == 15) {
-                            val varianceX = calculateVariance(nosePositions.map { it.x })
-                            val varianceY = calculateVariance(nosePositions.map { it.y })
-                            isMicroMotionLive.value = (varianceX > 0.1f || varianceY > 0.1f)
+        // === ML Kit Face Detection: runs every 3rd frame only ===
+        // Saves ~66% of ML Kit CPU cost while keeping ROI fresh enough
+        mlKitFrameCounter++
+        if (mlKitFrameCounter % ML_KIT_INTERVAL == 0 && !isDetectingFace) {
+            isDetectingFace = true
+            val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+
+            detector.process(image)
+                .addOnSuccessListener { faces ->
+                    if (faces.isNotEmpty()) {
+                        coastingFrames = 0
+                        hasFaceLost = false
+                        // Connect telemetry WebSocket on first face lock-on
+                        if (!isFaceDetectedState.value) {
+                            telemetryStreamer.connect()
                         }
-                    }
+                        isFaceDetectedState.value = true
 
-                    val bounds = face.boundingBox
-                    val roiWidth = (bounds.width() * 0.45).toInt()
-                    val roiLeft = bounds.centerX() - (roiWidth / 2)
-                    val roiHeight = (bounds.height() * 0.20).toInt()
-                    val roiTop = bounds.top + (bounds.height() * 0.10).toInt()
+                        val face = faces.first()
 
-                    val (mappedX, mappedY, mappedW, mappedH) = mapRoiToSensor(
-                        roiLeft, roiTop, roiWidth, roiHeight,
-                        imageProxy.width, imageProxy.height, rotationDegrees
-                    )
+                        // --- Layer 3: ML Kit Micro-Motion Tracking ---
+                        val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+                        if (noseBase != null) {
+                            if (nosePositions.size == 15) nosePositions.removeFirst()
+                            nosePositions.addLast(noseBase)
 
-                    val yuvData = yuvToByteArray(imageProxy)
-                    
-                    // Cache valid frame data for coasting
-                    lastGoodYuv = yuvData
-                    lastGoodRoi = intArrayOf(mappedX, mappedY, mappedW, mappedH)
-                    lastGoodWidth = imageProxy.width
-                    lastGoodHeight = imageProxy.height
-                    
-                    // Normal Frame Processing
-                    signalState.value = processFrame(
-                        yuvData, imageProxy.width, imageProxy.height,
-                        mappedX, mappedY, mappedW, mappedH,
-                        timestampSeconds
-                    )
-
-                    val metrics = extractHeartMetrics()
-                    if (metrics.size == 4) {
-                        bpmState.value = metrics[0]
-                        snrState.value = metrics[1]
-                        
-                        // Liveness Hysteresis with Tiered Status (0, 1, 2)
-                        val rawStatus = metrics[2].toInt()
-                        
-                        // Apply Micro-Motion Override
-                        val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
-                        
-                        livenessHistory.add(finalRawStatus)
-                        if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
-                        
-                        // Bug 2 Fix: Gate voting behind warmup window
-                        val votedStatus = if (livenessHistory.size < LIVENESS_SMOOTHING_WINDOW) {
-                            1 // Force ANALYZING during warmup
-                        } else {
-                            livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
-                        }
-                        
-                        // UX Dwell-Time Filter
-                        if (votedStatus != displayedStatus) {
-                            pendingStatusFrames++
-                            if (pendingStatusFrames >= MIN_DWELL_FRAMES) {
-                                displayedStatus = votedStatus
-                                pendingStatusFrames = 0
+                            if (nosePositions.size == 15) {
+                                val varianceX = calculateVariance(nosePositions.map { it.x })
+                                val varianceY = calculateVariance(nosePositions.map { it.y })
+                                isMicroMotionLive.value = (varianceX > 0.1f || varianceY > 0.1f)
                             }
-                        } else {
-                            pendingStatusFrames = 0
-                        }
-                        livenessStatusState.intValue = displayedStatus
-                        
-                        bufferSizeState.value = metrics[3]
-                        // One-way latch: lock UI into Metrics view once buffer is primed
-                        // (Moved here from inside HUDOverlay Composable — mutating state inside
-                        //  a Composable causes illegal recomposition side-effects)
-                        if (!isAnalysisReadyState.value && metrics[3] >= 150.0) {
-                            isAnalysisReadyState.value = true
                         }
 
-                        Log.i("SentinelTelemetry", 
-                            "Buffer: ${metrics[3].toInt()}/150 | " +
-                            "Coasting: false | " +
-                            "Status: $displayedStatus | " +
-                            "SNR: ${String.format("%.2f", metrics[1])} dB"
+                        // Update cached ROI for JNI processing on subsequent frames
+                        val bounds = face.boundingBox
+                        val roiWidth = (bounds.width() * 0.45).toInt()
+                        val roiLeft = bounds.centerX() - (roiWidth / 2)
+                        val roiHeight = (bounds.height() * 0.20).toInt()
+                        val roiTop = bounds.top + (bounds.height() * 0.10).toInt()
+
+                        // Debug overlay
+                        foreheadRoiState.value = RectF(
+                            roiLeft.toFloat(), roiTop.toFloat(),
+                            (roiLeft + roiWidth).toFloat(), (roiTop + roiHeight).toFloat()
                         )
-                    }
-                } else {
-                    // Face Lost: Coasting Logic
-                    val yuv = lastGoodYuv
-                    val roi = lastGoodRoi
-                    if (!hasFaceLost && coastingFrames < MAX_COASTING_FRAMES && yuv != null && roi != null) {
-                        coastingFrames++
-                        
-                        // Inject last known good data to keep buffer continuous
-                        signalState.value = processFrame(
-                            yuv, lastGoodWidth, lastGoodHeight,
-                            roi[0], roi[1], roi[2], roi[3],
-                            timestampSeconds
+                        val effectiveWidth = if (rotationDegrees == 90 || rotationDegrees == 270) imgHeight else imgWidth
+                        val effectiveHeight = if (rotationDegrees == 90 || rotationDegrees == 270) imgWidth else imgHeight
+                        roiImageWidth.intValue = effectiveWidth
+                        roiImageHeight.intValue = effectiveHeight
+
+                        // Cache mapped ROI for use by JNI on every frame
+                        val (mappedX, mappedY, mappedW, mappedH) = mapRoiToSensor(
+                            roiLeft, roiTop, roiWidth, roiHeight,
+                            imgWidth, imgHeight, rotationDegrees
                         )
-                        
-                        Log.d("SentinelDSP", "Coasting frame $coastingFrames / $MAX_COASTING_FRAMES | Injecting Duplicate Data")
-                    } else if (!hasFaceLost && coastingFrames >= MAX_COASTING_FRAMES) {
-                        Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
-                        hasFaceLost = true  // prevent re-entry without a boolean sentinel hack
-                        resetBuffers()
-                        livenessHistory.clear()
-                        nosePositions.clear()
-                        isMicroMotionLive.value = true
-                        isFaceDetectedState.value = false
-                        isAnalysisReadyState.value = false // Reset latch
-                        bpmState.value = 0.0
-                        snrState.value = 0.0
-                        livenessStatusState.intValue = 1
-                        displayedStatus = 1
-                        pendingStatusFrames = 0
-                        bufferSizeState.value = 0.0
-                        signalState.value = DoubleArray(0)
+                        lastGoodRoi = intArrayOf(mappedX, mappedY, mappedW, mappedH)
+                        lastGoodWidth = imgWidth
+                        lastGoodHeight = imgHeight
+
+                    } else {
+                        // Face lost — count coasting (scaled by detection interval)
+                        if (!hasFaceLost) {
+                            coastingFrames += ML_KIT_INTERVAL
+                            if (coastingFrames >= MAX_COASTING_FRAMES) {
+                                Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
+                                hasFaceLost = true
+                                resetBuffers()
+                                telemetryStreamer.disconnect()
+                                telemetryFrameCounter = 0
+                                livenessHistory.clear()
+                                nosePositions.clear()
+                                isMicroMotionLive.value = true
+                                foreheadRoiState.value = null
+                                isFaceDetectedState.value = false
+                                isAnalysisReadyState.value = false
+                                bpmState.value = 0.0
+                                snrState.value = 0.0
+                                livenessStatusState.intValue = 1
+                                displayedStatus = 1
+                                pendingStatusFrames = 0
+                                bufferSizeState.value = 0.0
+                                signalState.value = DoubleArray(0)
+                            }
+                        }
                     }
                 }
-            }
-            .addOnCompleteListener {
-                imageProxy.close()
-            }
+                .addOnCompleteListener {
+                    isDetectingFace = false
+                    imageProxy.close()
+                }
+        } else {
+            imageProxy.close()
+        }
     }
 
     private fun mapRoiToSensor(
@@ -536,6 +636,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        telemetryStreamer.shutdown()
         cameraExecutor.shutdown()
         detector.close()
     }

@@ -398,6 +398,19 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
         jint width, jint height, jint roiX, jint roiY, jint roiW, jint roiH,
         jdouble timestampSeconds) {
 
+    // One-time pre-allocation to avoid reallocation during buffer growth
+    static bool g_buffersReserved = false;
+    if (!g_buffersReserved) {
+        g_redBuffer.reserve(MAX_BUFFER_SIZE);
+        g_greenBuffer.reserve(MAX_BUFFER_SIZE);
+        g_blueBuffer.reserve(MAX_BUFFER_SIZE);
+        g_redClean.reserve(MAX_BUFFER_SIZE);
+        g_greenClean.reserve(MAX_BUFFER_SIZE);
+        g_blueClean.reserve(MAX_BUFFER_SIZE);
+        g_cachedDetrendedPOS.reserve(MAX_BUFFER_SIZE);
+        g_buffersReserved = true;
+    }
+
     jbyte *yuv_ptr = env->GetByteArrayElements(yuvData, nullptr);
     cv::Mat mYuv(height + height / 2, width, CV_8UC1, (unsigned char *)yuv_ptr);
     cv::Mat mRgb;
@@ -421,9 +434,9 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
         // Adaptive Glare Masking
         double rS = 0, gS = 0, bS = 0;
         int valid = 0;
-        for (int y = 0; y < roi.rows; ++y) {
+        for (int y = 0; y < roi.rows; y += 2) {
             const cv::Vec3b* p = roi.ptr<cv::Vec3b>(y);
-            for (int x = 0; x < roi.cols; ++x) {
+            for (int x = 0; x < roi.cols; x += 2) {
                 if (p[x][2] > 240 || p[x][1] > 240 || p[x][0] > 240) continue;
                 int maxC = std::max({p[x][0], p[x][1], p[x][2]});
                 int minC = std::min({p[x][0], p[x][1], p[x][2]});
