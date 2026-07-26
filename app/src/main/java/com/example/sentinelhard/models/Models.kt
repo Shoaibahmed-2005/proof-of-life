@@ -37,11 +37,10 @@ data class BiometricPayload(
  */
 @Serializable
 data class VerifyResponse(
-    val authenticated: Boolean,
-    val message: String = "",
+    val status: String,
     @SerialName("session_id")
-    val sessionId: String = "",
-    val confidence: Double = 0.0
+    val sessionId: String,
+    val reason: String? = null
 )
 
 /**

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 
+import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.connection_manager import manager
@@ -19,6 +21,39 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+@router.websocket("/ws/telemetry")
+async def telemetry_endpoint(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint for real-time biological telemetry streaming from Android.
+    """
+    await websocket.accept()
+    # Note: Telemetry doesn't need to be strictly tied to session_manager for this demo,
+    # but we can accept it for logging and processing.
+    try:
+        while True:
+            data = await websocket.receive_text()
+            telemetry = json.loads(data)
+
+            bpm = telemetry.get("bpm", 0.0)
+            snr = telemetry.get("snr", 0.0)
+            liveness_status = telemetry.get("liveness_status", 1)
+
+            status_label = {0: "SPOOF", 1: "ANALYZING", 2: "HUMAN"}.get(liveness_status, "UNKNOWN")
+
+            logger.info(
+                f"[Telemetry] BPM: {bpm:.1f} | SNR: {snr:.2f} | Liveness: {status_label} ({liveness_status})"
+            )
+
+            await websocket.send_text(json.dumps({
+                "ack": True,
+                "server_ts": datetime.now(timezone.utc).isoformat(),
+            }))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"[Error] WebSocket Exception: {e}")
 
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:

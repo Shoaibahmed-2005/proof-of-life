@@ -22,8 +22,8 @@ import {
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
-const API_BASE_URL = 'http://localhost:8000/api/v1';
-const WS_BASE_URL = 'ws://localhost:8000/api/v1/ws';
+const API_BASE_URL = 'http://localhost:8080/api/v1';
+const WS_BASE_URL = 'ws://localhost:8080/api/v1/ws';
 
 export default function App() {
   const [appStep, setAppStep] = useState(1);

@@ -725,10 +725,10 @@ class MainActivity : AppCompatActivity() {
                 // 3. Submit via Retrofit
                 val response = ApiClient.apiService.verifyBiometrics(verifyRequest)
                 
-                if (response.isSuccessful && response.body()?.authenticated == true) {
-                    authState.value = AuthState.Success(response.body()?.message ?: "Authenticated Successfully")
+                if (response.isSuccessful && response.body()?.status == "ACCESS_GRANTED") {
+                    authState.value = AuthState.Success("Authenticated Successfully")
                 } else {
-                    val errorMsg = response.body()?.message ?: "Verification Failed"
+                    val errorMsg = response.body()?.reason ?: "Verification Failed"
                     authState.value = AuthState.Error(errorMsg)
                 }
             } catch (e: Exception) {
