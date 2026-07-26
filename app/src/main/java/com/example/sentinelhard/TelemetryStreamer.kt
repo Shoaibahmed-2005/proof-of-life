@@ -22,7 +22,7 @@ class TelemetryStreamer {
         private const val TAG = "TelemetryStreamer"
         // Default: Android emulator loopback to host machine.
         // Replace with your machine's local IP for physical device testing.
-        private const val DEFAULT_URL = "ws://10.0.2.2:8000/ws/telemetry"
+        private const val DEFAULT_URL = "ws://192.168.1.5:8000/ws/telemetry"
     }
 
     private var webSocket: WebSocket? = null

@@ -43,7 +43,29 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import org.opencv.android.OpenCVLoader
+import com.example.sentinelhard.camera.QrCodeAnalyzer
+import com.example.sentinelhard.models.BiometricPayload
+import com.example.sentinelhard.models.VerifyRequest
+import com.example.sentinelhard.network.ApiClient
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.*
 import java.util.concurrent.Executors
+
+sealed class AuthState {
+    object SelectionMenu : AuthState()
+    object ScanQr : AuthState()
+    data class MeasureBiometrics(val sessionId: String) : AuthState()
+    object LivenessVerified : AuthState()
+    object Submitting : AuthState()
+    data class Success(val message: String) : AuthState()
+    data class Error(val message: String) : AuthState()
+}
 
 class MainActivity : AppCompatActivity() {
 
@@ -62,6 +84,10 @@ class MainActivity : AppCompatActivity() {
     private val foreheadRoiState = mutableStateOf<RectF?>(null)
     private val roiImageWidth = mutableIntStateOf(0)
     private val roiImageHeight = mutableIntStateOf(0)
+
+    // QR scanning phase state
+    private val authState = mutableStateOf<AuthState>(AuthState.SelectionMenu)
+    private val cryptoManager = CryptoManager()
 
     private val livenessHistory = mutableListOf<Int>()
     private val LIVENESS_SMOOTHING_WINDOW = 15
@@ -127,16 +153,118 @@ class MainActivity : AppCompatActivity() {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
 
+        cryptoManager.generateHardwareKey()
+
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF0A0A0A)
                 ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        CameraPreview(modifier = Modifier.fillMaxSize())
-                        ForeheadRoiOverlay()
-                        HUDOverlay()
+                    val currentAuthState by authState
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        
+                        if (currentAuthState != AuthState.SelectionMenu) {
+                            CameraPreview(modifier = Modifier.fillMaxSize())
+                        }
+                        
+                        when (val state = currentAuthState) {
+                            is AuthState.SelectionMenu -> {
+                                SelectionMenuUI(
+                                    onPhoneLogin = {
+                                        val localSessionId = "phone_session_${System.currentTimeMillis()}"
+                                        authState.value = AuthState.MeasureBiometrics(localSessionId)
+                                    },
+                                    onDesktopLogin = {
+                                        authState.value = AuthState.ScanQr
+                                    }
+                                )
+                            }
+                            is AuthState.ScanQr -> {
+                                Text(
+                                    text = "Scanning QR Code...",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 32.dp)
+                                )
+                            }
+                            is AuthState.MeasureBiometrics -> {
+                                ForeheadRoiOverlay()
+                                HUDOverlay()
+                            }
+                            is AuthState.LivenessVerified -> {
+                                StatusOverlayUI(
+                                    message = "Liveness Verified",
+                                    color = Color(0xFF00FF66),
+                                    icon = "✓"
+                                )
+                            }
+                            is AuthState.Submitting -> {
+                                StatusOverlayUI(
+                                    message = "Submitting Biometrics...",
+                                    color = Color.Yellow,
+                                    showProgress = true
+                                )
+                            }
+                            is AuthState.Success -> {
+                                StatusOverlayUI(
+                                    message = state.message,
+                                    color = Color(0xFF00FF66),
+                                    icon = "✓",
+                                    showCloseButton = true
+                                )
+                            }
+                            is AuthState.Error -> {
+                                StatusOverlayUI(
+                                    message = state.message,
+                                    color = Color.Red,
+                                    icon = "!",
+                                    showCloseButton = true
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun StatusOverlayUI(
+        message: String,
+        color: Color,
+        icon: String? = null,
+        showProgress: Boolean = false,
+        showCloseButton: Boolean = false
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.8f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (showProgress) {
+                    CircularProgressIndicator(color = color, modifier = Modifier.size(64.dp))
+                } else if (icon != null) {
+                    Text(text = icon, color = color, fontSize = 64.sp, fontWeight = FontWeight.Bold)
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = message,
+                    color = color,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
+
+                if (showCloseButton) {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    Button(onClick = { authState.value = AuthState.SelectionMenu }) {
+                        Text("Return to Menu")
                     }
                 }
             }
@@ -154,50 +282,142 @@ class MainActivity : AppCompatActivity() {
                 val previewView = PreviewView(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-
-                    val resolutionSelector = ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(
-                                AndroidSize(640, 480),
-                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                            )
-                        )
-                        .build()
-
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setResolutionSelector(resolutionSelector)
-                        .build()
-
-                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                        analyzeFrame(imageProxy)
-                    }
-
-                    val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-                    try {
-                        cameraProvider.unbindAll()
-                        val camera = cameraProvider.bindToLifecycle(
-                            lifecycleOwner, cameraSelector, preview, imageAnalysis
-                        )
-                        
-                        camera.cameraControl.let { control ->
-                            val exposureState = camera.cameraInfo.exposureState
-                            if (exposureState.isExposureCompensationSupported) {
-                                control.setExposureCompensationIndex(0)
-                            }
-                        }
-                    } catch (exc: Exception) {
-                        Log.e("SentinelHard", "Use case binding failed", exc)
+                    val state = authState.value
+                    if (state is AuthState.ScanQr) {
+                        bindQrScanner(cameraProvider, previewView, lifecycleOwner)
+                    } else if (state is AuthState.MeasureBiometrics) {
+                        bindRppgPipeline(cameraProvider, previewView, lifecycleOwner)
                     }
                 }, ContextCompat.getMainExecutor(context))
                 previewView
             },
             modifier = modifier
         )
+    }
+
+    private fun bindQrScanner(
+        cameraProvider: ProcessCameraProvider,
+        previewView: PreviewView,
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    ) {
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        // 720p is plenty for QR code recognition
+        val qrResolution = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    AndroidSize(1280, 720),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
+        val qrAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(qrResolution)
+            .build()
+
+        qrAnalysis.setAnalyzer(cameraExecutor, QrCodeAnalyzer { rawQrString ->
+            Log.i("SentinelHard", "QR Scanned: $rawQrString")
+            val sessionId = parseSessionId(rawQrString)
+            
+            runOnUiThread {
+                authState.value = AuthState.MeasureBiometrics(sessionId)
+            }
+
+            // Transition: unbind QR, bind rPPG pipeline
+            cameraProvider.unbindAll()
+            bindRppgPipeline(cameraProvider, previewView, lifecycleOwner)
+        })
+
+        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+        try {
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, qrAnalysis)
+        } catch (exc: Exception) {
+            Log.e("SentinelHard", "QR scanner binding failed", exc)
+        }
+    }
+
+    private fun bindRppgPipeline(
+        cameraProvider: ProcessCameraProvider,
+        previewView: PreviewView,
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    ) {
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    AndroidSize(640, 480),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(resolutionSelector)
+            .build()
+
+        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+            analyzeFrame(imageProxy)
+        }
+
+        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+        try {
+            cameraProvider.unbindAll()
+            val camera = cameraProvider.bindToLifecycle(
+                lifecycleOwner, cameraSelector, preview, imageAnalysis
+            )
+
+            camera.cameraControl.let { control ->
+                val exposureState = camera.cameraInfo.exposureState
+                if (exposureState.isExposureCompensationSupported) {
+                    control.setExposureCompensationIndex(0)
+                }
+            }
+        } catch (exc: Exception) {
+            Log.e("SentinelHard", "rPPG pipeline binding failed", exc)
+        }
+    }
+
+    @Composable
+    fun SelectionMenuUI(onPhoneLogin: () -> Unit, onDesktopLogin: () -> Unit) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Button(
+                onClick = onPhoneLogin,
+                modifier = Modifier
+                    .width(250.dp)
+                    .padding(bottom = 16.dp)
+            ) {
+                Text("Login Directly on Phone")
+            }
+
+            Button(
+                onClick = onDesktopLogin,
+                modifier = Modifier.width(250.dp)
+            ) {
+                Text("Scan Desktop QR Code")
+            }
+        }
+    }
+
+    private fun parseSessionId(rawString: String): String {
+        return try {
+            val json = JSONObject(rawString)
+            json.optString("session_id", rawString)
+        } catch (e: Exception) {
+            rawString
+        }
     }
 
     @Composable
@@ -441,6 +661,79 @@ class MainActivity : AppCompatActivity() {
                     livenessStatus = displayedStatus
                 )
                 telemetryFrameCounter = 0
+            }
+
+            // --- Automatic Submission Trigger ---
+            val state = authState.value
+            if (state is AuthState.MeasureBiometrics && !hasFaceLost) {
+                if (displayedStatus == 2 && metrics[3] >= 150.0) {
+                    val sessionId = state.sessionId
+                    authState.value = AuthState.LivenessVerified
+                    
+                    lifecycleScope.launch {
+                        delay(1200) // Visual handshake delay
+                        submitAuthentication(sessionId)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun submitAuthentication(sessionId: String) {
+        authState.value = AuthState.Submitting
+        
+        lifecycleScope.launch {
+            try {
+                // 1. Construct BiometricPayload
+                val deviceId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+                val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                // Calculate combined variance as a proxy for micro-motion liveness
+                val varianceX = calculateVariance(nosePositions.map { it.x })
+                val varianceY = calculateVariance(nosePositions.map { it.y })
+                val totalVariance = (varianceX + varianceY).toDouble()
+
+                val payloadObj = BiometricPayload(
+                    sessionId = sessionId,
+                    bpm = bpmState.value,
+                    timestamp = timestamp,
+                    deviceId = deviceId,
+                    snr = snrState.value,
+                    variance = totalVariance
+                )
+
+                val payloadJson = Json.encodeToString(payloadObj)
+                
+                // 2. Sign with CryptoManager
+                if (!cryptoManager.hasKey()) {
+                    cryptoManager.generateHardwareKey()
+                }
+                
+                val signature = cryptoManager.signPayload(payloadJson)
+                val publicKey = cryptoManager.getBase64PublicKey()
+                val attestationChain = cryptoManager.getAttestationChain()
+
+                val verifyRequest = VerifyRequest(
+                    payload = android.util.Base64.encodeToString(payloadJson.toByteArray(), android.util.Base64.NO_WRAP),
+                    signature = signature,
+                    publicKey = publicKey,
+                    attestationChain = attestationChain
+                )
+
+                // 3. Submit via Retrofit
+                val response = ApiClient.apiService.verifyBiometrics(verifyRequest)
+                
+                if (response.isSuccessful && response.body()?.authenticated == true) {
+                    authState.value = AuthState.Success(response.body()?.message ?: "Authenticated Successfully")
+                } else {
+                    val errorMsg = response.body()?.message ?: "Verification Failed"
+                    authState.value = AuthState.Error(errorMsg)
+                }
+            } catch (e: Exception) {
+                Log.e("SentinelHard", "Auth Submission Error", e)
+                authState.value = AuthState.Error(e.message ?: "Network Error")
             }
         }
     }

@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
 object ApiClient {
     // Android emulator loopback to host machine.
     // Replace with your machine's local IP for physical device testing.
-    private const val BASE_URL = "http://10.0.2.2:8000/api/"
+    private const val BASE_URL = "http://192.168.1.5:8000/api/"
 
     // Lenient JSON parser: ignores unknown fields from server, encodes defaults
     private val json = Json {
