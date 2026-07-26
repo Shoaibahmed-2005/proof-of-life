@@ -73,6 +73,8 @@ class MainActivity : AppCompatActivity() {
     private var lastGoodHeight = 0
     private var coastingFrames: Int = 0
     private val MAX_COASTING_FRAMES = 30 // ~1 second grace period at 30 FPS
+    // Replaces the fragile MAX_COASTING_FRAMES+1 sentinel integer with an explicit boolean
+    private var hasFaceLost = false
 
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -80,7 +82,8 @@ class MainActivity : AppCompatActivity() {
         FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
+            // CONTOUR_MODE_NONE: only NOSE_BASE landmark is needed; contours add latency with no benefit here
+            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_NONE)
             .build()
     )
 
@@ -208,9 +211,6 @@ class MainActivity : AppCompatActivity() {
                     modifier = Modifier.align(Alignment.Center)
                 )
             } else if (!isAnalysisReady) {
-                // Bug 1 Fix: Latch to Metrics view once ready
-                if (trueBufferSize >= 150.0) isAnalysisReadyState.value = true
-                
                 val progress = ((trueBufferSize / 150.0) * 100).toInt()
                 Column(
                     modifier = Modifier.align(Alignment.Center),
@@ -345,6 +345,7 @@ class MainActivity : AppCompatActivity() {
             .addOnSuccessListener { faces ->
                 if (faces.isNotEmpty()) {
                     coastingFrames = 0
+                    hasFaceLost = false  // clear after face re-detected
                     isFaceDetectedState.value = true
                     
                     val face = faces.first()
@@ -422,6 +423,12 @@ class MainActivity : AppCompatActivity() {
                         livenessStatusState.intValue = displayedStatus
                         
                         bufferSizeState.value = metrics[3]
+                        // One-way latch: lock UI into Metrics view once buffer is primed
+                        // (Moved here from inside HUDOverlay Composable — mutating state inside
+                        //  a Composable causes illegal recomposition side-effects)
+                        if (!isAnalysisReadyState.value && metrics[3] >= 150.0) {
+                            isAnalysisReadyState.value = true
+                        }
 
                         Log.i("SentinelTelemetry", 
                             "Buffer: ${metrics[3].toInt()}/150 | " +
@@ -434,7 +441,7 @@ class MainActivity : AppCompatActivity() {
                     // Face Lost: Coasting Logic
                     val yuv = lastGoodYuv
                     val roi = lastGoodRoi
-                    if (coastingFrames < MAX_COASTING_FRAMES && yuv != null && roi != null) {
+                    if (!hasFaceLost && coastingFrames < MAX_COASTING_FRAMES && yuv != null && roi != null) {
                         coastingFrames++
                         
                         // Inject last known good data to keep buffer continuous
@@ -445,24 +452,22 @@ class MainActivity : AppCompatActivity() {
                         )
                         
                         Log.d("SentinelDSP", "Coasting frame $coastingFrames / $MAX_COASTING_FRAMES | Injecting Duplicate Data")
-                    } else if (coastingFrames >= MAX_COASTING_FRAMES) {
-                        if (isFaceDetectedState.value) {
-                            Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
-                            resetBuffers()
-                            livenessHistory.clear()
-                            nosePositions.clear()
-                            isMicroMotionLive.value = true
-                            isFaceDetectedState.value = false
-                            isAnalysisReadyState.value = false // Reset latch
-                            bpmState.value = 0.0
-                            snrState.value = 0.0
-                            livenessStatusState.intValue = 1
-                            displayedStatus = 1
-                            pendingStatusFrames = 0
-                            bufferSizeState.value = 0.0
-                            signalState.value = DoubleArray(0)
-                            coastingFrames = MAX_COASTING_FRAMES + 1 // Sentinel: don't re-enter
-                        }
+                    } else if (!hasFaceLost && coastingFrames >= MAX_COASTING_FRAMES) {
+                        Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
+                        hasFaceLost = true  // prevent re-entry without a boolean sentinel hack
+                        resetBuffers()
+                        livenessHistory.clear()
+                        nosePositions.clear()
+                        isMicroMotionLive.value = true
+                        isFaceDetectedState.value = false
+                        isAnalysisReadyState.value = false // Reset latch
+                        bpmState.value = 0.0
+                        snrState.value = 0.0
+                        livenessStatusState.intValue = 1
+                        displayedStatus = 1
+                        pendingStatusFrames = 0
+                        bufferSizeState.value = 0.0
+                        signalState.value = DoubleArray(0)
                     }
                 }
             }
@@ -484,19 +489,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun yuvToByteArray(image: ImageProxy): ByteArray {
-        val yBuffer = image.planes[0].buffer
-        val uBuffer = image.planes[1].buffer
-        val vBuffer = image.planes[2].buffer
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val width  = image.width
+        val height = image.height
 
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
+        val nv21 = ByteArray(width * height * 3 / 2)
 
-        val nv21 = ByteArray(ySize + uSize + vSize)
+        // --- Y plane: copy row-by-row, respecting rowStride (handles end-of-row padding) ---
+        val yRowStride = yPlane.rowStride
+        val yBuffer    = yPlane.buffer
+        if (yRowStride == width) {
+            yBuffer.get(nv21, 0, width * height)
+        } else {
+            for (row in 0 until height) {
+                yBuffer.position(row * yRowStride)
+                yBuffer.get(nv21, row * width, width)
+            }
+        }
 
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
+        // --- VU interleave into NV21 format (V first, then U) ---
+        // Correctly handles both semi-planar (pixelStride=2) and fully-planar (pixelStride=1) sources.
+        val uvPixelStride = uPlane.pixelStride
+        val uvRowStride   = uPlane.rowStride
+        val uBuffer       = uPlane.buffer
+        val vBuffer       = vPlane.buffer
+        val ySize         = width * height
+
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                val srcPos = row * uvRowStride + col * uvPixelStride
+                nv21[ySize + row * width + col * 2]     = vBuffer.get(srcPos) // V
+                nv21[ySize + row * width + col * 2 + 1] = uBuffer.get(srcPos) // U
+            }
+        }
 
         return nv21
     }
