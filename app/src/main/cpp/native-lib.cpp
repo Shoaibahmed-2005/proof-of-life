@@ -3,6 +3,7 @@
 #include <opencv2/imgproc.hpp>
 #include <android/log.h>
 #include <vector>
+#include <deque>
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -24,93 +25,82 @@ struct SignalSample {
     double value;     // channel mean
 };
 
-class ButterworthBandpassFilter {
-private:
-    double hp_b0, hp_b1, hp_b2, hp_a1, hp_a2;
-    double lp_b0, lp_b1, lp_b2, lp_a1, lp_a2;
+// --- Helper Functions ---
+double calculateMean(const std::vector<double>& data) {
+    if (data.empty()) return 0.0;
+    double sum = std::accumulate(data.begin(), data.end(), 0.0);
+    return sum / data.size();
+}
 
-    // State history for the IIR delay lines
-    double hp_x1 = 0, hp_x2 = 0, hp_y1 = 0, hp_y2 = 0;
-    double lp_x1 = 0, lp_x2 = 0, lp_y1 = 0, lp_y2 = 0;
-
-public:
-    ButterworthBandpassFilter(double lowCut, double highCut, double sampleRate) {
-        updateCoefficients(lowCut, highCut, sampleRate);
+double calculateStdDev(const std::vector<double>& data, double mean) {
+    if (data.empty()) return 0.0;
+    double variance = 0.0;
+    for (double val : data) {
+        variance += (val - mean) * (val - mean);
     }
+    return std::sqrt(variance / data.size());
+}
 
-    void updateCoefficients(double lowCut, double highCut, double fs) {
-        if (fs <= 0.0) fs = 30.0;
+// Applies a zero-phase moving average subtraction to center the signal
+void applyFIRDetrending(const std::vector<double>& posSignal, std::vector<double>& outDetrended) {
+    size_t N = posSignal.size();
+    outDetrended.resize(N, 0.0);
 
-        // --- High Pass Filter Coefficients (0.75 Hz) ---
-        double omegaHP = std::tan(PI_VAL * lowCut / fs);
-        double normHP = 1.0 / (1.0 + std::sqrt(2.0) * omegaHP + omegaHP * omegaHP);
-        hp_b0 = normHP;
-        hp_b1 = -2.0 * hp_b0;
-        hp_b2 = hp_b0;
-        hp_a1 = 2.0 * (omegaHP * omegaHP - 1.0) * normHP;
-        hp_a2 = (1.0 - std::sqrt(2.0) * omegaHP + omegaHP * omegaHP) * normHP;
+    // 1-second moving average window (assuming ~30 FPS)
+    int windowSize = 30;
 
-        // --- Low Pass Filter Coefficients (2.5 Hz) ---
-        double omegaLP = std::tan(PI_VAL * highCut / fs);
-        double normLP = 1.0 / (1.0 + std::sqrt(2.0) * omegaLP + omegaLP * omegaLP);
-        lp_b0 = omegaLP * omegaLP * normLP;
-        lp_b1 = 2.0 * lp_b0;
-        lp_b2 = lp_b0;
-        lp_a1 = 2.0 * (omegaLP * omegaLP - 1.0) * normLP;
-        lp_a2 = (1.0 - std::sqrt(2.0) * omegaLP + omegaLP * omegaLP) * normLP;
-    }
+    for (size_t i = 0; i < N; ++i) {
+        double sum = 0.0;
+        int count = 0;
 
-    void reset() {
-        hp_x1 = hp_x2 = hp_y1 = hp_y2 = 0;
-        lp_x1 = lp_x2 = lp_y1 = lp_y2 = 0;
-    }
+        // Calculate the local baseline (moving average)
+        int startIdx = std::max(0, static_cast<int>(i) - windowSize / 2);
+        int endIdx = std::min(static_cast<int>(N) - 1, static_cast<int>(i) + windowSize / 2);
 
-    double process(double sample) {
-        if (!std::isfinite(sample)) sample = 0.0;
-
-        // 1. Process High Pass
-        double hp_out = hp_b0 * sample + hp_b1 * hp_x1 + hp_b2 * hp_x2 - hp_a1 * hp_y1 - hp_a2 * hp_y2;
-        hp_x2 = hp_x1; hp_x1 = sample;
-        hp_y2 = hp_y1; hp_y1 = hp_out;
-
-        // 2. Process Low Pass (fed by High Pass output)
-        double lp_out = lp_b0 * hp_out + lp_b1 * lp_x1 + lp_b2 * lp_x2 - lp_a1 * lp_y1 - lp_a2 * lp_y2;
-        lp_x2 = lp_x1; lp_x1 = hp_out;
-        lp_y2 = lp_y1; lp_y1 = lp_out;
-
-        // 3. Self-Healing Check
-        if (!std::isfinite(lp_out)) {
-            hp_x1 = hp_x2 = hp_y1 = hp_y2 = 0.0;
-            lp_x1 = lp_x2 = lp_y1 = lp_y2 = 0.0;
-            return 0.0;
+        for (int j = startIdx; j <= endIdx; ++j) {
+            sum += posSignal[j];
+            count++;
         }
 
-        return lp_out;
+        double localMean = sum / count;
+
+        // Detrend: Subtract baseline from the actual signal
+        outDetrended[i] = posSignal[i] - localMean;
     }
-};
+}
 
 // Global / Persistent state
-static std::vector<SignalSample> g_greenBuffer;
 static std::vector<SignalSample> g_redBuffer;
+static std::vector<SignalSample> g_greenBuffer;
 static std::vector<SignalSample> g_blueBuffer;
 
-static std::vector<double> g_greenFiltered;
-static std::vector<double> g_redFiltered;
-static std::vector<double> g_blueFiltered;
-static std::vector<double> g_ratioFiltered; // Ratiometric signal
+static std::vector<double> g_redClean;
+static std::vector<double> g_greenClean;
+static std::vector<double> g_blueClean;
 
-static double g_smoothedBpm = 0.0;
-static double g_smoothedSnr = 0.0;
+// Kalman Filter State
+static double g_kalmanBpm = 75.0; // Initial state estimate
+static double g_kalmanCovariance = 10.0;
+const double PROCESS_NOISE = 0.05; // How fast HR can change
+
+// Multi-Modal Anti-Spoofing State
+static std::deque<double> g_bpmHistory;
+static bool g_isTextureSpoof = false;
+static double g_lastSharpness = 0.0;
+static double g_smoothedConfidence = 0.5;
+
+double computeStdDev(const std::deque<double>& data) {
+    if (data.empty()) return 0.0;
+    double sum = std::accumulate(data.begin(), data.end(), 0.0);
+    double mean = sum / (double)data.size();
+    double sq_sum = std::inner_product(data.begin(), data.end(), data.begin(), 0.0);
+    double variance = (sq_sum / (double)data.size()) - (mean * mean);
+    return std::sqrt(std::max(0.0, variance));
+}
 
 static const double WINDOW_DURATION = 5.0;   // 5-second sliding window
 static const double TARGET_FS = 30.0;         // Resample target: 30 Hz
 static const double TARGET_DT = 1.0 / TARGET_FS;
-
-// Independent Filter Instances
-static ButterworthBandpassFilter filterRatio(0.75, 2.5, 30.0);
-static ButterworthBandpassFilter filterR(0.75, 2.5, 30.0);
-static ButterworthBandpassFilter filterG(0.75, 2.5, 30.0);
-static ButterworthBandpassFilter filterB(0.75, 2.5, 30.0);
 
 // Linear Interpolation
 double interpolate(double t, double t0, double v0, double t1, double v1) {
@@ -144,8 +134,45 @@ std::vector<double> resampleToUniform(const std::vector<SignalSample>& buffer) {
     return uniformSignal;
 }
 
-// --- Anti-Spoofing Biological Verification ---
+// POS (Plane-Orthogonal-to-Skin) Engine
+void applyPOS(const std::vector<double>& bufferR,
+              const std::vector<double>& bufferG,
+              const std::vector<double>& bufferB,
+              std::vector<double>& outSignal) {
 
+    size_t N = bufferR.size();
+    if (N == 0) return;
+    outSignal.resize(N);
+
+    double meanR = calculateMean(bufferR);
+    double meanG = calculateMean(bufferG);
+    double meanB = calculateMean(bufferB);
+
+    std::vector<double> X(N, 0.0);
+    std::vector<double> Y(N, 0.0);
+
+    for (size_t i = 0; i < N; ++i) {
+        double normR = bufferR[i] / (meanR + 1e-6);
+        double normG = bufferG[i] / (meanG + 1e-6);
+        double normB = bufferB[i] / (meanB + 1e-6);
+
+        X[i] = normG - normB;
+        Y[i] = normG + normB - (2.0 * normR);
+    }
+
+    double meanX = calculateMean(X);
+    double meanY = calculateMean(Y);
+    double stdX = calculateStdDev(X, meanX);
+    double stdY = calculateStdDev(Y, meanY);
+
+    double alpha = stdX / (stdY + 1e-6);
+
+    for (size_t i = 0; i < N; ++i) {
+        outSignal[i] = X[i] + (alpha * Y[i]);
+    }
+}
+
+// Anti-Spoofing: Correlation Check
 bool isScreenFlicker(const std::vector<double>& green, const std::vector<double>& red, double* outCorrelation) {
     if (green.size() < 150 || red.size() < 150) return false;
 
@@ -171,57 +198,73 @@ bool isScreenFlicker(const std::vector<double>& green, const std::vector<double>
 
     double correlation = num / (sqrt(denomG * denomR) + 1e-6);
     if (outCorrelation) *outCorrelation = correlation;
-    return correlation > 0.95;
+    // Increased threshold for higher noise tolerance
+    return correlation > 0.98;
 }
 
-// --- Heart Rate Extraction Math ---
-
-std::vector<double> extractVitals(const std::vector<double>& signal, const std::vector<double>& green, const std::vector<double>& red) {
-    if (signal.size() < 150) {
-        return {0.0, 0.0, 0.0};
+// Adaptive 1D Kalman Filter for BPM stabilization
+double applyKalmanStabilization(double rawBpm, double qualityRatio) {
+    if (qualityRatio < 1.0) {
+        return g_kalmanBpm;
     }
 
-    // 1. JS LOGIC: SIGNAL POWER (Static Image Check)
+    double pPredict = g_kalmanCovariance + PROCESS_NOISE;
+    double measurementNoise = 20.0 / (qualityRatio * qualityRatio);
+    double K = pPredict / (pPredict + measurementNoise);
+
+    g_kalmanBpm = g_kalmanBpm + K * (rawBpm - g_kalmanBpm);
+    g_kalmanCovariance = (1.0 - K) * pPredict;
+
+    return g_kalmanBpm;
+}
+
+// Heart Rate Extraction with POS and FIR Detrending
+std::vector<double> extractVitals() {
+    if (g_redClean.size() < 150) return {0.0, 0.0, 0.0};
+
+    // 1. POS PROJECTION
+    std::vector<double> rawPos;
+    applyPOS(g_redClean, g_greenClean, g_blueClean, rawPos);
+
+    // 2. FIR DETRENDING
+    std::vector<double> detrendedPos;
+    applyFIRDetrending(rawPos, detrendedPos);
+
+    size_t N = 150;
+    size_t startIdx = detrendedPos.size() - 150;
+    std::vector<double> processedSignal(N);
+
+    for (size_t i = 0; i < N; ++i) {
+        double multiplier = 0.54 - 0.46 * cos(2.0 * PI_VAL * i / (N - 1));
+        processedSignal[i] = detrendedPos[startIdx + i] * multiplier;
+    }
+
+    // 3. SIGNAL POWER check
     double powerSum = 0.0;
-    for (double val : signal) {
-        powerSum += (val * val);
-    }
-    double signalPower = std::sqrt(powerSum / static_cast<double>(signal.size()));
+    for (double val : processedSignal) powerSum += (val * val);
+    double signalPower = std::sqrt(powerSum / N);
 
-    // Threshold lowered for Ratiometric signal (G/(R+B) is much smaller than raw pixels)
     if (signalPower < 0.001) {
         LOGI("Spoof: Signal Power too low (%.6f)", signalPower);
         return {0.0, 0.0, 0.0};
     }
 
-    // 2. Correlation Check (Multi-layer defense)
+    // 4. Texture & Correlation Check
     double correlation = 0.0;
-    if (isScreenFlicker(green, red, &correlation)) {
-        LOGI("Spoof: High Correlation (%.2f)", correlation);
-        return {0.0, -10.0, 0.0};
-    }
+    bool isFlicker = isScreenFlicker(g_greenClean, g_redClean, &correlation);
 
-    int N = 150;
-    size_t startIdx = signal.size() - 150;
-
-    std::vector<double> windowedSignal(N);
-    for (int i = 0; i < N; ++i) {
-        double multiplier = 0.54 - 0.46 * cos(2.0 * PI_VAL * i / (N - 1));
-        windowedSignal[i] = signal[startIdx + i] * multiplier;
-    }
-
+    // 5. DTFT SPECTRAL ANALYSIS
     std::vector<double> power_spectrum(MAX_BPM - MIN_BPM + 1, 0.0);
     double max_power = 0.0;
     int peakIndex = -1;
 
     for (int bpm = (int)MIN_BPM; bpm <= (int)MAX_BPM; ++bpm) {
         double f = bpm / 60.0;
-        double sum_real = 0.0;
-        double sum_imag = 0.0;
+        double sum_real = 0.0, sum_imag = 0.0;
         for (int n = 0; n < N; ++n) {
             double angle = -2.0 * PI_VAL * f * (n / TARGET_FS);
-            sum_real += windowedSignal[n] * cos(angle);
-            sum_imag += windowedSignal[n] * sin(angle);
+            sum_real += processedSignal[n] * cos(angle);
+            sum_imag += processedSignal[n] * sin(angle);
         }
         double power = (sum_real * sum_real) + (sum_imag * sum_imag);
         int spectrumIdx = bpm - (int)MIN_BPM;
@@ -232,7 +275,7 @@ std::vector<double> extractVitals(const std::vector<double>& signal, const std::
         }
     }
 
-    // 3. JS LOGIC: PEAK-TO-NOISE RATIO (Video Screen Check)
+    // 6. Quality Ratio (SNR)
     double noiseSum = 0.0;
     int noiseCount = 0;
     for (int i = 0; i < (int)power_spectrum.size(); i++) {
@@ -241,65 +284,74 @@ std::vector<double> extractVitals(const std::vector<double>& signal, const std::
             noiseCount++;
         }
     }
-    double avgNoise = (noiseCount > 0) ? (noiseSum / noiseCount) : 1e-6;
-    double qualityRatio = max_power / avgNoise;
+    double qualityRatio = max_power / ((noiseSum / noiseCount) + 1e-6);
 
-    // Threshold lowered for noisy mobile front cameras
-    if (qualityRatio < 1.2) {
-        LOGI("Spoof: Quality Ratio too low (%.2f) | Power: %.6f", qualityRatio, signalPower);
-        return {0.0, qualityRatio, 0.0};
-    }
-
-    // 4. Quadratic Peak Interpolation
+    // 7. Quadratic Interpolation
     double exactPeakBpm = MIN_BPM + peakIndex;
     if (peakIndex > 0 && peakIndex < (int)power_spectrum.size() - 1) {
-        double y1 = power_spectrum[peakIndex - 1];
-        double y2 = power_spectrum[peakIndex];
-        double y3 = power_spectrum[peakIndex + 1];
-        double denominator = y1 - 2.0 * y2 + y3;
-        if (std::abs(denominator) > 1e-5) {
-            double offset = 0.5 * (y1 - y3) / denominator;
-            exactPeakBpm = (MIN_BPM + peakIndex) + offset;
-        }
+        double y1 = power_spectrum[peakIndex - 1], y2 = power_spectrum[peakIndex], y3 = power_spectrum[peakIndex + 1];
+        double den = y1 - 2.0 * y2 + y3;
+        if (std::abs(den) > 1e-5) exactPeakBpm += 0.5 * (y1 - y3) / den;
     }
 
-    return {exactPeakBpm, qualityRatio, 1.0};
+    // 8. HRV Check
+    g_bpmHistory.push_back(exactPeakBpm);
+    if (g_bpmHistory.size() > 10) g_bpmHistory.pop_front();
+    double bpmStdDev = computeStdDev(g_bpmHistory);
+
+    // 9. WEIGHTED CONFIDENCE ENGINE
+    double confidence = 0.0;
+
+    // Texture Score (30%)
+    double textureScore = 1.0;
+    if (g_lastSharpness < 30.0) textureScore = g_lastSharpness / 30.0;
+    else if (g_lastSharpness > 500.0) textureScore = std::max(0.0, 1.0 - (g_lastSharpness - 500.0) / 500.0);
+    confidence += 0.30 * std::clamp(textureScore, 0.0, 1.0);
+
+    // QR Score (30%)
+    double qrScore = std::clamp((qualityRatio - 0.8) / (1.6 - 0.8), 0.0, 1.0);
+    confidence += 0.30 * qrScore;
+
+    // Correlation Score (20%)
+    double corrScore = std::clamp(1.0 - (correlation - 0.90) / (0.98 - 0.90), 0.0, 1.0);
+    confidence += 0.20 * corrScore;
+
+    // HRV Score (20%)
+    double hrvScore = (g_bpmHistory.size() < 10) ? 0.5 : std::clamp(bpmStdDev / 0.3, 0.0, 1.0);
+    confidence += 0.20 * hrvScore;
+
+    // Temporal Confidence Smoothing (0.90 / 0.10 EMA)
+    g_smoothedConfidence = 0.90 * g_smoothedConfidence + 0.10 * confidence;
+
+    // 3-Tier Status Output
+    double status = 1.0; // ANALYZING/UNCERTAIN
+    if (g_smoothedConfidence > 0.65) status = 2.0; // HUMAN
+    else if (g_smoothedConfidence < 0.45) status = 0.0; // SPOOF
+
+    LOGI("Vitals: Conf=%.2f (Smoothed=%.2f) | QR=%.2f | BPM=%.1f | Status=%.0f",
+         confidence, g_smoothedConfidence, qualityRatio, exactPeakBpm, status);
+
+    double smoothedBpm = applyKalmanStabilization(exactPeakBpm, qualityRatio);
+
+    return {smoothedBpm, qualityRatio, status};
 }
 
-// --- JNI Implementation ---
-
+// JNI Implementations
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_sentinelhard_MainActivity_resetBuffers(JNIEnv *env, jobject /* thiz */) {
-    g_greenBuffer.clear();
-    g_redBuffer.clear();
-    g_blueBuffer.clear();
-    g_greenFiltered.clear();
-    g_redFiltered.clear();
-    g_blueFiltered.clear();
-    g_ratioFiltered.clear();
-
-    filterRatio.reset();
-    filterR.reset();
-    filterG.reset();
-    filterB.reset();
-
-    g_smoothedBpm = 0.0;
-    g_smoothedSnr = 0.0;
-    LOGI("Buffers and Filters Reset");
+    g_redBuffer.clear(); g_greenBuffer.clear(); g_blueBuffer.clear();
+    g_redClean.clear(); g_greenClean.clear(); g_blueClean.clear();
+    g_bpmHistory.clear();
+    g_kalmanBpm = 75.0; g_kalmanCovariance = 10.0;
+    g_smoothedConfidence = 0.5;
+    g_isTextureSpoof = false;
+    LOGI("State Reset");
 }
 
-extern "C"
-JNIEXPORT jdoubleArray JNICALL
+extern "C" JNIEXPORT jdoubleArray JNICALL
 Java_com_example_sentinelhard_MainActivity_processFrame(
-        JNIEnv *env,
-        jobject /* this */,
-        jbyteArray yuvData,
-        jint width,
-        jint height,
-        jint roiX,
-        jint roiY,
-        jint roiW,
-        jint roiH,
+        JNIEnv *env, jobject /* thiz */, jbyteArray yuvData,
+        jint width, jint height, jint roiX, jint roiY, jint roiW, jint roiH,
         jdouble timestampSeconds) {
 
     jbyte *yuv_ptr = env->GetByteArrayElements(yuvData, nullptr);
@@ -310,13 +362,39 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
     cv::Rect safeRoi(roiX, roiY, roiW, roiH);
     safeRoi &= cv::Rect(0, 0, mRgb.cols, mRgb.rows);
 
-    double rMean = 0.0, gMean = 0.0, bMean = 0.0;
+    double rMean = 0, gMean = 0, bMean = 0;
     if (safeRoi.width > 0 && safeRoi.height > 0) {
-        cv::Mat skinRegion = mRgb(safeRoi);
-        cv::Scalar means = cv::mean(skinRegion);
-        rMean = means[0]; // R
-        gMean = means[1]; // G
-        bMean = means[2]; // B
+        cv::Mat roi = mRgb(safeRoi);
+
+        // Laplacian Texture Check
+        cv::Mat gray, lap;
+        cv::cvtColor(roi, gray, cv::COLOR_RGB2GRAY);
+        cv::Laplacian(gray, lap, CV_64F);
+        cv::Scalar mL, sL;
+        cv::meanStdDev(lap, mL, sL);
+        g_lastSharpness = sL[0] * sL[0];
+        g_isTextureSpoof = (g_lastSharpness < 30.0 || g_lastSharpness > 500.0);
+
+        // Adaptive Glare Masking
+        double rS = 0, gS = 0, bS = 0;
+        int valid = 0;
+        for (int y = 0; y < roi.rows; ++y) {
+            const cv::Vec3b* p = roi.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < roi.cols; ++x) {
+                if (p[x][2] > 240 || p[x][1] > 240 || p[x][0] > 240) continue;
+                int maxC = std::max({p[x][0], p[x][1], p[x][2]});
+                int minC = std::min({p[x][0], p[x][1], p[x][2]});
+                if (maxC > 180 && (maxC - minC) < 15) continue;
+                rS += p[x][2]; gS += p[x][1]; bS += p[x][0];
+                valid++;
+            }
+        }
+        if (valid > 0) {
+            rMean = rS / valid; gMean = gS / valid; bMean = bS / valid;
+        } else {
+            cv::Scalar m = cv::mean(roi);
+            rMean = m[2]; gMean = m[1]; bMean = m[0];
+        }
     }
     env->ReleaseByteArrayElements(yuvData, yuv_ptr, JNI_ABORT);
 
@@ -324,68 +402,43 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
     g_greenBuffer.push_back({timestampSeconds, gMean});
     g_blueBuffer.push_back({timestampSeconds, bMean});
 
-    double cutoffTime = timestampSeconds - WINDOW_DURATION;
-    auto purge = [cutoffTime](const SignalSample& s) { return s.timestamp < cutoffTime; };
+    double cutoff = timestampSeconds - WINDOW_DURATION;
+    auto purge = [cutoff](const SignalSample& s) { return s.timestamp < cutoff; };
     g_redBuffer.erase(std::remove_if(g_redBuffer.begin(), g_redBuffer.end(), purge), g_redBuffer.end());
     g_greenBuffer.erase(std::remove_if(g_greenBuffer.begin(), g_greenBuffer.end(), purge), g_greenBuffer.end());
     g_blueBuffer.erase(std::remove_if(g_blueBuffer.begin(), g_blueBuffer.end(), purge), g_blueBuffer.end());
 
-    if (g_greenBuffer.back().timestamp - g_greenBuffer.front().timestamp >= 0.1) {
-        std::vector<double> uniformR = resampleToUniform(g_redBuffer);
-        std::vector<double> uniformG = resampleToUniform(g_greenBuffer);
-        std::vector<double> uniformB = resampleToUniform(g_blueBuffer);
-
-        if (!uniformR.empty() && !uniformG.empty() && !uniformB.empty()) {
-            g_redFiltered.push_back(filterR.process(uniformR.back()));
-            g_greenFiltered.push_back(filterG.process(uniformG.back()));
-            g_blueFiltered.push_back(filterB.process(uniformB.back()));
-
-            double ratio = 0.5;
-            if (uniformR.back() + uniformB.back() > 5.0) {
-                ratio = uniformG.back() / (uniformR.back() + uniformB.back());
-            }
-            g_ratioFiltered.push_back(filterRatio.process(ratio));
-
-            while (g_greenFiltered.size() > MAX_BUFFER_SIZE) {
-                g_redFiltered.erase(g_redFiltered.begin());
-                g_greenFiltered.erase(g_greenFiltered.begin());
-                g_blueFiltered.erase(g_blueFiltered.begin());
-                g_ratioFiltered.erase(g_ratioFiltered.begin());
-            }
+    if (g_greenBuffer.size() > 2) {
+        std::vector<double> uR = resampleToUniform(g_redBuffer);
+        std::vector<double> uG = resampleToUniform(g_greenBuffer);
+        std::vector<double> uB = resampleToUniform(g_blueBuffer);
+        if (!uR.empty()) {
+            g_redClean = uR; g_greenClean = uG; g_blueClean = uB;
         }
     }
 
-    size_t numPoints = g_ratioFiltered.size();
-    jdoubleArray result = env->NewDoubleArray((jsize)numPoints);
-    if (numPoints > 0) {
-        env->SetDoubleArrayRegion(result, 0, (jsize)numPoints, g_ratioFiltered.data());
+    // For visualization, return the current detrended POS window (last 150)
+    std::vector<double> visSignal;
+    if (g_redClean.size() >= 150) {
+        std::vector<double> rawPos;
+        applyPOS(g_redClean, g_greenClean, g_blueClean, rawPos);
+        applyFIRDetrending(rawPos, visSignal);
+        if (visSignal.size() > 150) {
+            visSignal.erase(visSignal.begin(), visSignal.end() - 150);
+        }
     }
-    return result;
+
+    jdoubleArray res = env->NewDoubleArray(visSignal.size());
+    env->SetDoubleArrayRegion(res, 0, visSignal.size(), visSignal.data());
+    return res;
 }
 
 extern "C" JNIEXPORT jdoubleArray JNICALL
-Java_com_example_sentinelhard_MainActivity_extractHeartMetrics(
-        JNIEnv *env, jobject /* thiz */) {
-
-    double current_size = static_cast<double>(g_ratioFiltered.size());
-    std::vector<double> metrics = {0.0, 0.0, 0.0, current_size};
-
-    if (current_size >= (double)MAX_BUFFER_SIZE) {
-        std::vector<double> vitals = extractVitals(g_ratioFiltered, g_greenFiltered, g_redFiltered);
-
-        double currentBpm = vitals[0];
-        if (g_smoothedBpm == 0.0 || std::abs(g_smoothedBpm - currentBpm) > 25.0) {
-            g_smoothedBpm = currentBpm;
-        } else {
-            g_smoothedBpm = (0.85 * g_smoothedBpm) + (0.15 * currentBpm);
-        }
-
-        metrics[0] = g_smoothedBpm;
-        metrics[1] = vitals[1]; // Quality Ratio
-        metrics[2] = vitals[2]; // Liveness
-    }
-
-    jdoubleArray result = env->NewDoubleArray(4);
-    env->SetDoubleArrayRegion(result, 0, 4, metrics.data());
-    return result;
+Java_com_example_sentinelhard_MainActivity_extractHeartMetrics(JNIEnv *env, jobject /* thiz */) {
+    std::vector<double> v = extractVitals();
+    double current_size = static_cast<double>(g_greenClean.size());
+    std::vector<double> m = {v[0], v[1], v[2], current_size};
+    jdoubleArray res = env->NewDoubleArray(4);
+    env->SetDoubleArrayRegion(res, 0, 4, m.data());
+    return res;
 }

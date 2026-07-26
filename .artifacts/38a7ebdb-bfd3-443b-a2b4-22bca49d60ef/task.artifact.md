@@ -1,4 +1,5 @@
-- [x] Reduce `signalPower` threshold in `native-lib.cpp`
-- [x] Add diagnostic logging for raw signal metrics in `native-lib.cpp`
-- [x] Refine liveness hysteresis in `MainActivity.kt`
-- [x] Verify build with `./gradlew :app:assembleDebug`
+- [x] Phase 17: Multi-Modal Reliability & Tiered UX Stability
+    - [x] Implement robust DSP (FIR/Kalman) and Confidence Engine in `native-lib.cpp`
+    - [x] Fix ROI rotation bug and implement Coasting Injector in `MainActivity.kt`
+    - [x] Implement UX Dwell-Time logic and 3-Tier HUD in `MainActivity.kt`
+    - [x] Verify build with `./gradlew :app:assembleDebug`

@@ -2,6 +2,7 @@ package com.example.sentinelhard
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.PointF
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
@@ -37,6 +38,7 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
 import org.opencv.android.OpenCVLoader
 import java.util.concurrent.Executors
 
@@ -45,15 +47,31 @@ class MainActivity : AppCompatActivity() {
     private val signalState = mutableStateOf(DoubleArray(0))
     private val bpmState = mutableStateOf(0.0)
     private val snrState = mutableStateOf(0.0)
-    private val isLiveState = mutableStateOf(false)
+    
+    // 3-Tier Liveness State: 0 = Spoof, 1 = Analyzing, 2 = Human
+    private val livenessStatusState = mutableIntStateOf(1)
+    
     private val bufferSizeState = mutableStateOf(0.0)
     private val isFaceDetectedState = mutableStateOf(false)
 
-    private var lastDetectionTime = 0L
-    private val FACE_LOSS_TIMEOUT_MS = 1500L
+    private val livenessHistory = mutableListOf<Int>()
+    private val LIVENESS_SMOOTHING_WINDOW = 15
 
-    private val livenessHistory = mutableListOf<Boolean>()
-    private val LIVENESS_SMOOTHING_WINDOW = 10
+    // Dwell-Time Filter State
+    private var displayedStatus = 1
+    private var pendingStatusFrames = 0
+    private val MIN_DWELL_FRAMES = 20 // ~0.6s at 30fps
+
+    private val nosePositions = ArrayDeque<PointF>(15)
+    private val isMicroMotionLive = mutableStateOf(true)
+
+    // Coasting State
+    private var lastGoodYuv: ByteArray? = null
+    private var lastGoodRoi: IntArray? = null
+    private var lastGoodWidth = 0
+    private var lastGoodHeight = 0
+    private var coastingFrames: Int = 0
+    private val MAX_COASTING_FRAMES = 30 // ~1 second grace period at 30 FPS
 
     private val cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -163,7 +181,7 @@ class MainActivity : AppCompatActivity() {
         val signalData by signalState
         val bpm by bpmState
         val snr by snrState
-        val isLive by isLiveState
+        val livenessStatus by livenessStatusState
         val trueBufferSize by bufferSizeState
         val isFaceDetected by isFaceDetectedState
 
@@ -219,18 +237,30 @@ class MainActivity : AppCompatActivity() {
                     MetricItem(label = "SIGNAL SNR", value = "%.1f".format(snr), unit = "dB", color = Color(0xFF00CCFF))
                 }
 
+                val statusText = when (livenessStatus) {
+                    2 -> "VERIFIED HUMAN"
+                    0 -> "SPOOF DETECTED"
+                    else -> "ANALYZING SIGNAL..."
+                }
+                
+                val statusColor = when (livenessStatus) {
+                    2 -> Color(0xFF00FF66)
+                    0 -> Color.Red
+                    else -> Color.Yellow
+                }
+
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(end = 24.dp, top = 80.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isLive) Color(0xFF00FF66).copy(alpha = 0.2f) else Color.Red.copy(alpha = 0.2f))
-                        .border(1.dp, if (isLive) Color(0xFF00FF66) else Color.Red, RoundedCornerShape(8.dp))
+                        .background(statusColor.copy(alpha = 0.2f))
+                        .border(1.dp, statusColor, RoundedCornerShape(8.dp))
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
                     Text(
-                        text = if (isLive) "VERIFIED HUMAN" else "SPOOF DETECTED",
-                        color = if (isLive) Color(0xFF00FF66) else Color.Red,
+                        text = statusText,
+                        color = statusColor,
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold
                     )
@@ -304,16 +334,30 @@ class MainActivity : AppCompatActivity() {
         val mediaImage = imageProxy.image ?: return
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+        val timestampSeconds = imageProxy.imageInfo.timestamp / 1_000_000_000.0
 
         detector.process(image)
             .addOnSuccessListener { faces ->
                 if (faces.isNotEmpty()) {
-                    lastDetectionTime = System.currentTimeMillis()
+                    coastingFrames = 0
                     isFaceDetectedState.value = true
                     
                     val face = faces.first()
-                    val bounds = face.boundingBox
 
+                    // --- Layer 3: ML Kit Micro-Motion Tracking ---
+                    val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+                    if (noseBase != null) {
+                        if (nosePositions.size == 15) nosePositions.removeFirst()
+                        nosePositions.addLast(noseBase)
+
+                        if (nosePositions.size == 15) {
+                            val varianceX = calculateVariance(nosePositions.map { it.x })
+                            val varianceY = calculateVariance(nosePositions.map { it.y })
+                            isMicroMotionLive.value = (varianceX > 0.1f || varianceY > 0.1f)
+                        }
+                    }
+
+                    val bounds = face.boundingBox
                     val roiWidth = (bounds.width() * 0.45).toInt()
                     val roiLeft = bounds.centerX() - (roiWidth / 2)
                     val roiHeight = (bounds.height() * 0.20).toInt()
@@ -325,8 +369,14 @@ class MainActivity : AppCompatActivity() {
                     )
 
                     val yuvData = yuvToByteArray(imageProxy)
-                    val timestampSeconds = imageProxy.imageInfo.timestamp / 1_000_000_000.0
-
+                    
+                    // Cache valid frame data for coasting
+                    lastGoodYuv = yuvData
+                    lastGoodRoi = intArrayOf(mappedX, mappedY, mappedW, mappedH)
+                    lastGoodWidth = imageProxy.width
+                    lastGoodHeight = imageProxy.height
+                    
+                    // Normal Frame Processing
                     signalState.value = processFrame(
                         yuvData, imageProxy.width, imageProxy.height,
                         mappedX, mappedY, mappedW, mappedH,
@@ -338,25 +388,70 @@ class MainActivity : AppCompatActivity() {
                         bpmState.value = metrics[0]
                         snrState.value = metrics[1]
                         
-                        // Liveness Hysteresis
-                        val rawIsLive = metrics[2] > 0.5
-                        livenessHistory.add(rawIsLive)
+                        // Liveness Hysteresis with Tiered Status (0, 1, 2)
+                        val rawStatus = metrics[2].toInt()
+                        
+                        // Apply Micro-Motion Override (if totally still for 15 frames, force uncertain/analyzing or spoof)
+                        val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
+                        
+                        livenessHistory.add(finalRawStatus)
                         if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
-                        isLiveState.value = livenessHistory.count { it } > (LIVENESS_SMOOTHING_WINDOW / 2)
+                        
+                        // Majority Vote for Tiered Status
+                        val votedStatus = livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
+                        
+                        // UX Dwell-Time Filter
+                        if (votedStatus != displayedStatus) {
+                            pendingStatusFrames++
+                            if (pendingStatusFrames >= MIN_DWELL_FRAMES) {
+                                displayedStatus = votedStatus
+                                pendingStatusFrames = 0
+                            }
+                        } else {
+                            pendingStatusFrames = 0
+                        }
+                        livenessStatusState.intValue = displayedStatus
                         
                         bufferSizeState.value = metrics[3]
+
+                        Log.i("SentinelTelemetry", 
+                            "Buffer: ${metrics[3].toInt()}/150 | " +
+                            "Coasting: false | " +
+                            "Status: $displayedStatus | " +
+                            "SNR: ${String.format("%.2f", metrics[1])} dB"
+                        )
                     }
                 } else {
-                    if (System.currentTimeMillis() - lastDetectionTime > FACE_LOSS_TIMEOUT_MS) {
+                    // Face Lost: Coasting Logic
+                    val yuv = lastGoodYuv
+                    val roi = lastGoodRoi
+                    if (coastingFrames < MAX_COASTING_FRAMES && yuv != null && roi != null) {
+                        coastingFrames++
+                        
+                        // Inject last known good data to keep buffer continuous
+                        signalState.value = processFrame(
+                            yuv, lastGoodWidth, lastGoodHeight,
+                            roi[0], roi[1], roi[2], roi[3],
+                            timestampSeconds
+                        )
+                        
+                        Log.d("SentinelDSP", "Coasting frame $coastingFrames / $MAX_COASTING_FRAMES | Injecting Duplicate Data")
+                    } else if (coastingFrames >= MAX_COASTING_FRAMES) {
                         if (isFaceDetectedState.value) {
+                            Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
                             resetBuffers()
                             livenessHistory.clear()
+                            nosePositions.clear()
+                            isMicroMotionLive.value = true
                             isFaceDetectedState.value = false
                             bpmState.value = 0.0
                             snrState.value = 0.0
-                            isLiveState.value = false
+                            livenessStatusState.intValue = 1
+                            displayedStatus = 1
+                            pendingStatusFrames = 0
                             bufferSizeState.value = 0.0
                             signalState.value = DoubleArray(0)
+                            coastingFrames++ // Past max to only reset once
                         }
                     }
                 }
@@ -394,6 +489,12 @@ class MainActivity : AppCompatActivity() {
         uBuffer.get(nv21, ySize + vSize, uSize)
 
         return nv21
+    }
+
+    private fun calculateVariance(values: List<Float>): Float {
+        if (values.isEmpty()) return 0f
+        val mean = values.average().toFloat()
+        return values.map { (it - mean) * (it - mean) }.average().toFloat()
     }
 
     override fun onDestroy() {
