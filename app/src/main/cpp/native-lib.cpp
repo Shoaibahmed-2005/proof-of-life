@@ -17,6 +17,30 @@ const double MAX_BPM = 180.0;
 const double FPS = 30.0; // Resampled framerate
 const int MAX_BUFFER_SIZE = 150;
 const double PI_VAL = 3.14159265358979323846;
+const int FFT_SIZE = 1024; // Zero-padded FFT: ~1.76 BPM/bin resolution at 30 Hz
+
+// --- Confidence Engine Weights (must sum to 1.0) ---
+const double WEIGHT_TEXTURE     = 0.30;
+const double WEIGHT_QR          = 0.30;
+const double WEIGHT_CORRELATION = 0.20;
+const double WEIGHT_HRV         = 0.20;
+
+// --- Confidence Engine Thresholds ---
+const double SHARPNESS_MIN   = 30.0;   // Below: too smooth (screen/print spoof)
+const double SHARPNESS_MAX   = 500.0;  // Above: saturated (glare/overexposure)
+const double QR_SCORE_MIN    = 0.8;    // SNR lower bound for full QR score
+const double QR_SCORE_MAX    = 1.6;    // SNR upper bound for full QR score
+const double CORR_SCORE_MIN  = 0.90;   // Correlation lower bound
+const double CORR_SCORE_MAX  = 0.98;   // Correlation upper bound (screen flicker threshold)
+const double HRV_STD_TARGET  = 0.3;    // Target BPM std-dev for max HRV liveness score
+const double EMA_SLOW        = 0.90;   // Confidence EMA slow factor
+const double EMA_FAST        = 0.10;   // Confidence EMA fast factor
+
+// --- Hysteresis Dead-Band (Schmitt Trigger — preserves anti-flicker behaviour) ---
+const double HYSTERESIS_HUMAN_ENTER  = 0.65; // ANALYZING → HUMAN
+const double HYSTERESIS_HUMAN_LEAVE  = 0.60; // HUMAN → ANALYZING
+const double HYSTERESIS_SPOOF_ENTER  = 0.45; // ANALYZING → SPOOF
+const double HYSTERESIS_SPOOF_LEAVE  = 0.50; // SPOOF → ANALYZING
 
 // --- Signal Processing Utilities ---
 
@@ -78,6 +102,9 @@ static std::vector<double> g_redClean;
 static std::vector<double> g_greenClean;
 static std::vector<double> g_blueClean;
 
+// Cached detrended POS signal — computed once per frame in processFrame, reused by extractVitals
+static std::vector<double> g_cachedDetrendedPOS;
+
 // Kalman Filter State
 static double g_kalmanBpm = 75.0; // Initial state estimate
 static double g_kalmanCovariance = 10.0;
@@ -85,7 +112,6 @@ const double PROCESS_NOISE = 0.05; // How fast HR can change
 
 // Multi-Modal Anti-Spoofing State
 static std::deque<double> g_bpmHistory;
-static bool g_isTextureSpoof = false;
 static double g_lastSharpness = 0.0;
 static double g_smoothedConfidence = 0.5;
 
@@ -220,23 +246,18 @@ double applyKalmanStabilization(double rawBpm, double qualityRatio) {
 
 // Heart Rate Extraction with POS and FIR Detrending
 std::vector<double> extractVitals() {
-    if (g_redClean.size() < 150) return {0.0, 0.0, 0.0};
+    // Use the cached detrended POS signal (populated by processFrame each frame)
+    // This avoids recomputing POS + FIR detrending redundantly.
+    if (g_cachedDetrendedPOS.size() < 150) return {0.0, 0.0, 0.0};
 
-    // 1. POS PROJECTION
-    std::vector<double> rawPos;
-    applyPOS(g_redClean, g_greenClean, g_blueClean, rawPos);
-
-    // 2. FIR DETRENDING
-    std::vector<double> detrendedPos;
-    applyFIRDetrending(rawPos, detrendedPos);
-
-    size_t N = 150;
-    size_t startIdx = detrendedPos.size() - 150;
+    // Apply Hamming window to the last 150 samples of the cached detrended signal
+    const size_t N = 150;
+    const size_t startIdx = g_cachedDetrendedPOS.size() - N;
     std::vector<double> processedSignal(N);
 
     for (size_t i = 0; i < N; ++i) {
-        double multiplier = 0.54 - 0.46 * cos(2.0 * PI_VAL * i / (N - 1));
-        processedSignal[i] = detrendedPos[startIdx + i] * multiplier;
+        double multiplier = 0.54 - 0.46 * cos(2.0 * PI_VAL * i / (N - 1)); // Hamming window
+        processedSignal[i] = g_cachedDetrendedPOS[startIdx + i] * multiplier;
     }
 
     // 3. SIGNAL POWER check
@@ -249,49 +270,60 @@ std::vector<double> extractVitals() {
         return {0.0, 0.0, 0.0};
     }
 
-    // 4. Texture & Correlation Check
+    // 4. Correlation Check (isFlicker return value unused; correlation out-param is what matters)
     double correlation = 0.0;
-    bool isFlicker = isScreenFlicker(g_greenClean, g_redClean, &correlation);
+    isScreenFlicker(g_greenClean, g_redClean, &correlation);
 
-    // 5. DTFT SPECTRAL ANALYSIS
-    std::vector<double> power_spectrum(MAX_BPM - MIN_BPM + 1, 0.0);
+    // 5. FFT-BASED SPECTRAL ANALYSIS — O(N log N), zero-padded to FFT_SIZE for ~1.76 BPM/bin resolution
+    cv::Mat fftInput = cv::Mat::zeros(1, FFT_SIZE, CV_64F);
+    for (size_t i = 0; i < N; ++i) {
+        fftInput.at<double>(0, (int)i) = processedSignal[i];
+    }
+    cv::Mat fftOutput;
+    cv::dft(fftInput, fftOutput, cv::DFT_COMPLEX_OUTPUT);
+
+    const double FREQ_RES = TARGET_FS / (double)FFT_SIZE; // Hz per bin (~0.0293 Hz for 1024-pt)
+    const int FFT_BINS = FFT_SIZE / 2 + 1;                // unique bins for real-valued input
+
+    std::vector<double> power_spectrum(FFT_BINS, 0.0);
+    for (int bin = 0; bin < FFT_BINS; ++bin) {
+        cv::Vec2d c = fftOutput.at<cv::Vec2d>(0, bin);
+        power_spectrum[bin] = c[0] * c[0] + c[1] * c[1];
+    }
+
+    // Identify cardiac band and peak within it
+    const int binMin = (int)std::ceil(MIN_BPM / 60.0 / FREQ_RES);
+    const int binMax = std::min((int)std::floor(MAX_BPM / 60.0 / FREQ_RES), FFT_BINS - 1);
+
     double max_power = 0.0;
-    int peakIndex = -1;
-
-    for (int bpm = (int)MIN_BPM; bpm <= (int)MAX_BPM; ++bpm) {
-        double f = bpm / 60.0;
-        double sum_real = 0.0, sum_imag = 0.0;
-        for (int n = 0; n < N; ++n) {
-            double angle = -2.0 * PI_VAL * f * (n / TARGET_FS);
-            sum_real += processedSignal[n] * cos(angle);
-            sum_imag += processedSignal[n] * sin(angle);
-        }
-        double power = (sum_real * sum_real) + (sum_imag * sum_imag);
-        int spectrumIdx = bpm - (int)MIN_BPM;
-        power_spectrum[spectrumIdx] = power;
-        if (power > max_power) {
-            max_power = power;
-            peakIndex = spectrumIdx;
+    int peakBin = binMin;
+    for (int bin = binMin; bin <= binMax; ++bin) {
+        if (power_spectrum[bin] > max_power) {
+            max_power = power_spectrum[bin];
+            peakBin = bin;
         }
     }
 
-    // 6. Quality Ratio (SNR)
+    // 6. Quality Ratio (SNR) — peak vs mean non-peak bins within cardiac band
+    //    Uses same in-band semantics as original DTFT SNR, so existing thresholds remain valid.
     double noiseSum = 0.0;
     int noiseCount = 0;
-    for (int i = 0; i < (int)power_spectrum.size(); i++) {
-        if (i != peakIndex) {
-            noiseSum += power_spectrum[i];
+    for (int bin = binMin; bin <= binMax; ++bin) {
+        if (bin != peakBin) {
+            noiseSum += power_spectrum[bin];
             noiseCount++;
         }
     }
-    double qualityRatio = max_power / ((noiseSum / noiseCount) + 1e-6);
+    double qualityRatio = max_power / ((noiseCount > 0 ? noiseSum / noiseCount : 1.0) + 1e-6);
 
-    // 7. Quadratic Interpolation
-    double exactPeakBpm = MIN_BPM + peakIndex;
-    if (peakIndex > 0 && peakIndex < (int)power_spectrum.size() - 1) {
-        double y1 = power_spectrum[peakIndex - 1], y2 = power_spectrum[peakIndex], y3 = power_spectrum[peakIndex + 1];
+    // 7. Sub-bin BPM precision via quadratic interpolation
+    double exactPeakBpm = peakBin * FREQ_RES * 60.0;
+    if (peakBin > binMin && peakBin < binMax) {
+        double y1 = power_spectrum[peakBin - 1], y2 = power_spectrum[peakBin], y3 = power_spectrum[peakBin + 1];
         double den = y1 - 2.0 * y2 + y3;
-        if (std::abs(den) > 1e-5) exactPeakBpm += 0.5 * (y1 - y3) / den;
+        if (std::abs(den) > 1e-5) {
+            exactPeakBpm += 0.5 * (y1 - y3) / den * FREQ_RES * 60.0;
+        }
     }
 
     // 8. HRV Check
@@ -302,41 +334,41 @@ std::vector<double> extractVitals() {
     // 9. WEIGHTED CONFIDENCE ENGINE
     double confidence = 0.0;
 
-    // Texture Score (30%)
+    // Texture Score
     double textureScore = 1.0;
-    if (g_lastSharpness < 30.0) textureScore = g_lastSharpness / 30.0;
-    else if (g_lastSharpness > 500.0) textureScore = std::max(0.0, 1.0 - (g_lastSharpness - 500.0) / 500.0);
-    confidence += 0.30 * std::clamp(textureScore, 0.0, 1.0);
+    if (g_lastSharpness < SHARPNESS_MIN) textureScore = g_lastSharpness / SHARPNESS_MIN;
+    else if (g_lastSharpness > SHARPNESS_MAX) textureScore = std::max(0.0, 1.0 - (g_lastSharpness - SHARPNESS_MAX) / SHARPNESS_MAX);
+    confidence += WEIGHT_TEXTURE * std::clamp(textureScore, 0.0, 1.0);
 
-    // QR Score (30%)
-    double qrScore = std::clamp((qualityRatio - 0.8) / (1.6 - 0.8), 0.0, 1.0);
-    confidence += 0.30 * qrScore;
+    // QR (SNR) Score
+    double qrScore = std::clamp((qualityRatio - QR_SCORE_MIN) / (QR_SCORE_MAX - QR_SCORE_MIN), 0.0, 1.0);
+    confidence += WEIGHT_QR * qrScore;
 
-    // Correlation Score (20%)
-    double corrScore = std::clamp(1.0 - (correlation - 0.90) / (0.98 - 0.90), 0.0, 1.0);
-    confidence += 0.20 * corrScore;
+    // Correlation Score
+    double corrScore = std::clamp(1.0 - (correlation - CORR_SCORE_MIN) / (CORR_SCORE_MAX - CORR_SCORE_MIN), 0.0, 1.0);
+    confidence += WEIGHT_CORRELATION * corrScore;
 
-    // HRV Score (20%)
-    double hrvScore = (g_bpmHistory.size() < 10) ? 0.5 : std::clamp(bpmStdDev / 0.3, 0.0, 1.0);
-    confidence += 0.20 * hrvScore;
+    // HRV Score
+    double hrvScore = (g_bpmHistory.size() < 10) ? 0.5 : std::clamp(bpmStdDev / HRV_STD_TARGET, 0.0, 1.0);
+    confidence += WEIGHT_HRV * hrvScore;
 
-    // Temporal Confidence Smoothing (0.90 / 0.10 EMA)
-    g_smoothedConfidence = 0.90 * g_smoothedConfidence + 0.10 * confidence;
+    // Temporal Confidence Smoothing (EMA)
+    g_smoothedConfidence = EMA_SLOW * g_smoothedConfidence + EMA_FAST * confidence;
 
     // --- Bug 4 Fix: Hysteresis Dead-Band ---
     static double prev_status = 1.0;
     double status = 1.0; // ANALYZING
 
     if (prev_status == 2.0) {
-        // Must drop below 0.60 to leave HUMAN state
-        status = (g_smoothedConfidence < 0.60) ? 1.0 : 2.0;
+        // Must drop below HYSTERESIS_HUMAN_LEAVE to exit HUMAN state
+        status = (g_smoothedConfidence < HYSTERESIS_HUMAN_LEAVE) ? 1.0 : 2.0;
     } else if (prev_status == 0.0) {
-        // Must rise above 0.50 to leave SPOOF state
-        status = (g_smoothedConfidence > 0.50) ? 1.0 : 0.0;
+        // Must rise above HYSTERESIS_SPOOF_LEAVE to exit SPOOF state
+        status = (g_smoothedConfidence > HYSTERESIS_SPOOF_LEAVE) ? 1.0 : 0.0;
     } else {
         // Entering from ANALYZING
-        if (g_smoothedConfidence > 0.65) status = 2.0;
-        else if (g_smoothedConfidence < 0.45) status = 0.0;
+        if (g_smoothedConfidence > HYSTERESIS_HUMAN_ENTER) status = 2.0;
+        else if (g_smoothedConfidence < HYSTERESIS_SPOOF_ENTER) status = 0.0;
     }
     prev_status = status;
 
@@ -353,10 +385,10 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_example_sentinelhard_MainActivity_resetBuffers(JNIEnv *env, jobject /* thiz */) {
     g_redBuffer.clear(); g_greenBuffer.clear(); g_blueBuffer.clear();
     g_redClean.clear(); g_greenClean.clear(); g_blueClean.clear();
+    g_cachedDetrendedPOS.clear();
     g_bpmHistory.clear();
     g_kalmanBpm = 75.0; g_kalmanCovariance = 10.0;
     g_smoothedConfidence = 0.5;
-    g_isTextureSpoof = false;
     LOGI("State Reset");
 }
 
@@ -365,6 +397,19 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
         JNIEnv *env, jobject /* thiz */, jbyteArray yuvData,
         jint width, jint height, jint roiX, jint roiY, jint roiW, jint roiH,
         jdouble timestampSeconds) {
+
+    // One-time pre-allocation to avoid reallocation during buffer growth
+    static bool g_buffersReserved = false;
+    if (!g_buffersReserved) {
+        g_redBuffer.reserve(MAX_BUFFER_SIZE);
+        g_greenBuffer.reserve(MAX_BUFFER_SIZE);
+        g_blueBuffer.reserve(MAX_BUFFER_SIZE);
+        g_redClean.reserve(MAX_BUFFER_SIZE);
+        g_greenClean.reserve(MAX_BUFFER_SIZE);
+        g_blueClean.reserve(MAX_BUFFER_SIZE);
+        g_cachedDetrendedPOS.reserve(MAX_BUFFER_SIZE);
+        g_buffersReserved = true;
+    }
 
     jbyte *yuv_ptr = env->GetByteArrayElements(yuvData, nullptr);
     cv::Mat mYuv(height + height / 2, width, CV_8UC1, (unsigned char *)yuv_ptr);
@@ -378,21 +423,20 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
     if (safeRoi.width > 0 && safeRoi.height > 0) {
         cv::Mat roi = mRgb(safeRoi);
 
-        // Laplacian Texture Check
+        // Laplacian Texture Check — variance of Laplacian as sharpness score
         cv::Mat gray, lap;
         cv::cvtColor(roi, gray, cv::COLOR_RGB2GRAY);
         cv::Laplacian(gray, lap, CV_64F);
         cv::Scalar mL, sL;
         cv::meanStdDev(lap, mL, sL);
         g_lastSharpness = sL[0] * sL[0];
-        g_isTextureSpoof = (g_lastSharpness < 30.0 || g_lastSharpness > 500.0);
 
         // Adaptive Glare Masking
         double rS = 0, gS = 0, bS = 0;
         int valid = 0;
-        for (int y = 0; y < roi.rows; ++y) {
+        for (int y = 0; y < roi.rows; y += 2) {
             const cv::Vec3b* p = roi.ptr<cv::Vec3b>(y);
-            for (int x = 0; x < roi.cols; ++x) {
+            for (int x = 0; x < roi.cols; x += 2) {
                 if (p[x][2] > 240 || p[x][1] > 240 || p[x][0] > 240) continue;
                 int maxC = std::max({p[x][0], p[x][1], p[x][2]});
                 int minC = std::min({p[x][0], p[x][1], p[x][2]});
@@ -429,15 +473,19 @@ Java_com_example_sentinelhard_MainActivity_processFrame(
         }
     }
 
-    // For visualization, return the current detrended POS window (last 150)
-    std::vector<double> visSignal;
+    // Compute and cache the detrended POS signal — used by both visualization and extractVitals.
+    // Doing it here once eliminates the redundant computation in extractVitals.
     if (g_redClean.size() >= 150) {
         std::vector<double> rawPos;
         applyPOS(g_redClean, g_greenClean, g_blueClean, rawPos);
-        applyFIRDetrending(rawPos, visSignal);
-        if (visSignal.size() > 150) {
-            visSignal.erase(visSignal.begin(), visSignal.end() - 150);
-        }
+        applyFIRDetrending(rawPos, g_cachedDetrendedPOS);
+    }
+
+    // Return last 150 samples for waveform visualization
+    std::vector<double> visSignal;
+    if (g_cachedDetrendedPOS.size() >= 150) {
+        size_t start = g_cachedDetrendedPOS.size() - 150;
+        visSignal.assign(g_cachedDetrendedPOS.begin() + start, g_cachedDetrendedPOS.end());
     }
 
     jdoubleArray res = env->NewDoubleArray(visSignal.size());
