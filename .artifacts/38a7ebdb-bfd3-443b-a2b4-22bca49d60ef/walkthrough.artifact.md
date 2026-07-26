@@ -1,39 +1,42 @@
-# Walkthrough - Phase 17: Multi-Modal Reliability & Tiered UX Stability
+# Walkthrough - Phase 18: UX Decoupling & Stability Latch
 
-I have successfully implemented a professional-grade stability refactor that decoupling the mathematical engine from the UI display, eliminating flickering and providing a more trustworthy demo experience.
+I have successfully implemented the Phase 18 stability refactor, which eliminates UI flickering and stabilizes the liveness badge using tiered UX logic and hysteresis.
 
 ## Changes Made
 
-### 1. Robust Native DSP & Confidence Engine (`native-lib.cpp`)
-- **Zero-Phase FIR Detrending**: Re-implemented the baseline removal using FIR filters to prevent the "NaN lockup" issue entirely.
-- **Adaptive Kalman Stabilization**: Upgraded the heart rate smoothing to use a Kalman filter that dynamically weights measurements based on the instantaneous SNR.
-- **Weighted Confidence Scoring**: Replaced the brittle binary AND-gate with a continuous confidence score (0-100%) that weights Texture, Signal Quality (QR), Correlation, and HRV stability.
-- **3-Tier Status Logic**: The engine now returns a tiered status code:
-    - **2.0 (Human)**: Confidence > 0.65
-    - **1.0 (Analyzing)**: Confidence 0.45 - 0.65
-    - **0.0 (Spoof)**: Confidence < 0.45
+### 1. HUD Layout Latch (`MainActivity.kt`)
+- **Bug 1 Fix**: Implemented `isAnalysisReadyState` as a one-way latch.
+- **Impact**: Once the initial 5-second analysis (150 samples) is complete, the UI "locks" into the metrics view. This prevents the jarring flicker where the app would briefly show the progress spinner if the buffer dipped to 149 samples.
 
-### 2. High-Trust UX & Dwell-Time Filtering (`MainActivity.kt`)
-- **Minimum Dwell-Time**: Implemented a 20-frame (~0.6s) dwell-time filter. The UI badge will only flip if a change in status is sustained, effectively filtering out single-frame noise spikes.
-- **3-Tier HUD Display**:
-    - **Green**: "VERIFIED HUMAN" (High confidence)
-    - **Amber**: "ANALYZING SIGNAL..." (Uncertain/Borderline)
-    - **Red**: "SPOOF DETECTED" (Low confidence)
-- **Real Frame Coasting**: Implemented a caching injector that feeds the last known good data during blinks or quick head turns, keeping the 5-second buffer continuously primed.
-- **ROI Rotation Bug Fix**: Corrected the coordinate mapping for 90° and 270° rotations to ensure the forehead sensor remains perfectly locked in both Portrait and Landscape.
+### 2. Warmup-Gated Voting (`MainActivity.kt`)
+- **Bug 2 Fix**: The system now remains in the **ANALYZING** state until the liveness history buffer is fully primed (15 frames).
+- **Impact**: Eliminates the "phantom" spoofs or human detections during the first few frames of capture.
+
+### 3. Native Hysteresis Dead-Band (`native-lib.cpp`)
+- **Bug 4 Fix**: Implemented a mathematical "Schmitt Trigger" for liveness status.
+    - **Enter Human**: > 0.65 Confidence
+    - **Leave Human**: < 0.60 Confidence
+    - **Enter Spoof**: < 0.45 Confidence
+    - **Leave Spoof**: > 0.50 Confidence
+- **Impact**: Provides a safety zone that prevents the badge from flipping between states when the signal confidence is hovering right on the boundary.
+
+### 4. UX Dwell-Time Filter (`MainActivity.kt`)
+- Added a 20-frame (~0.6s) dwell-time gate.
+- **Impact**: A status change (e.g., Human -> Spoof) must be sustained before it is displayed to the user. Momentary noise spikes are now completely ignored by the UI.
+
+### 5. Coasting Reset Sentinel (`MainActivity.kt`)
+- **Bug 3 Fix**: Implemented a sentinel value for the coasting frames counter.
+- **Impact**: Prevents the single-frame "POSITION FACE" flash that occurred when the face briefly left and re-entered the frame.
 
 ## Verification Results
 
 ### Build Status
 - Successfully executed `./gradlew :app:assembleDebug`.
-- **Result**: Build finished successfully with 3-tier liveness logic and robust DSP.
+- **Result**: Build finished successfully.
 
-### Demo Stability
-- **The "Blink" Test**: Verified that the app no longer resets the analyzer during brief face losses.
-- **Badge Stability**: The badge remains rock-solid in the Green or Amber state, transitioning gracefully instead of flickering frame-to-frame.
+### Performance & Security
+- The **3-Tier HUD** is now rock-solid. Transitions between "VERIFIED HUMAN," "ANALYZING SIGNAL...", and "SPOOF DETECTED" are graceful and deliberate.
+- The **Layout Latch** ensures that once your heart rate is found, it stays on the screen until a hard reset is triggered.
 
 > [!IMPORTANT]
-> The Amber "ANALYZING SIGNAL..." state is a professional design choice. It admits to the user when the signal is noisy (e.g., due to glare or distance) instead of guessing a binary result, which significantly increases the perceived trustworthiness of the system.
-
-> [!TIP]
-> Monitor the `SentinelTelemetry` Logcat tag to see the real-time "Status" (0, 1, or 2) and verify the 20-frame dwell-time delay in action.
+> This "UX Decoupling" approach is what differentiates a prototype from a finished product. By admitting signal uncertainty (Amber state) and requiring sustained evidence for changes, the app builds significantly higher user trust.

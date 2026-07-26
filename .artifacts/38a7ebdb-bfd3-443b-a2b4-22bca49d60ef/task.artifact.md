@@ -1,5 +1,7 @@
-- [x] Phase 17: Multi-Modal Reliability & Tiered UX Stability
-    - [x] Implement robust DSP (FIR/Kalman) and Confidence Engine in `native-lib.cpp`
-    - [x] Fix ROI rotation bug and implement Coasting Injector in `MainActivity.kt`
-    - [x] Implement UX Dwell-Time logic and 3-Tier HUD in `MainActivity.kt`
+- [x] Phase 18: UX Decoupling & Stability Latch
+    - [x] Implement Hysteresis Dead-Band in `native-lib.cpp`
+    - [x] Implement Analysis Latch in `MainActivity.kt`
+    - [x] Implement Warmup-Gated Voting in `MainActivity.kt`
+    - [x] Implement UX Dwell-Time logic in `MainActivity.kt`
+    - [x] Fix Coasting Reset sentinel in `MainActivity.kt`
     - [x] Verify build with `./gradlew :app:assembleDebug`

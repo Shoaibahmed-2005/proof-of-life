@@ -323,10 +323,22 @@ std::vector<double> extractVitals() {
     // Temporal Confidence Smoothing (0.90 / 0.10 EMA)
     g_smoothedConfidence = 0.90 * g_smoothedConfidence + 0.10 * confidence;
 
-    // 3-Tier Status Output
-    double status = 1.0; // ANALYZING/UNCERTAIN
-    if (g_smoothedConfidence > 0.65) status = 2.0; // HUMAN
-    else if (g_smoothedConfidence < 0.45) status = 0.0; // SPOOF
+    // --- Bug 4 Fix: Hysteresis Dead-Band ---
+    static double prev_status = 1.0;
+    double status = 1.0; // ANALYZING
+
+    if (prev_status == 2.0) {
+        // Must drop below 0.60 to leave HUMAN state
+        status = (g_smoothedConfidence < 0.60) ? 1.0 : 2.0;
+    } else if (prev_status == 0.0) {
+        // Must rise above 0.50 to leave SPOOF state
+        status = (g_smoothedConfidence > 0.50) ? 1.0 : 0.0;
+    } else {
+        // Entering from ANALYZING
+        if (g_smoothedConfidence > 0.65) status = 2.0;
+        else if (g_smoothedConfidence < 0.45) status = 0.0;
+    }
+    prev_status = status;
 
     LOGI("Vitals: Conf=%.2f (Smoothed=%.2f) | QR=%.2f | BPM=%.1f | Status=%.0f",
          confidence, g_smoothedConfidence, qualityRatio, exactPeakBpm, status);

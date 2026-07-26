@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     
     private val bufferSizeState = mutableStateOf(0.0)
     private val isFaceDetectedState = mutableStateOf(false)
+    private val isAnalysisReadyState = mutableStateOf(false)
 
     private val livenessHistory = mutableListOf<Int>()
     private val LIVENESS_SMOOTHING_WINDOW = 15
@@ -184,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         val livenessStatus by livenessStatusState
         val trueBufferSize by bufferSizeState
         val isFaceDetected by isFaceDetectedState
+        val isAnalysisReady by isAnalysisReadyState
 
         Box(modifier = Modifier.fillMaxSize()) {
             // --- Title ---
@@ -205,7 +207,10 @@ class MainActivity : AppCompatActivity() {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.align(Alignment.Center)
                 )
-            } else if (trueBufferSize < 150.0) {
+            } else if (!isAnalysisReady) {
+                // Bug 1 Fix: Latch to Metrics view once ready
+                if (trueBufferSize >= 150.0) isAnalysisReadyState.value = true
+                
                 val progress = ((trueBufferSize / 150.0) * 100).toInt()
                 Column(
                     modifier = Modifier.align(Alignment.Center),
@@ -391,14 +396,18 @@ class MainActivity : AppCompatActivity() {
                         // Liveness Hysteresis with Tiered Status (0, 1, 2)
                         val rawStatus = metrics[2].toInt()
                         
-                        // Apply Micro-Motion Override (if totally still for 15 frames, force uncertain/analyzing or spoof)
+                        // Apply Micro-Motion Override
                         val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
                         
                         livenessHistory.add(finalRawStatus)
                         if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
                         
-                        // Majority Vote for Tiered Status
-                        val votedStatus = livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
+                        // Bug 2 Fix: Gate voting behind warmup window
+                        val votedStatus = if (livenessHistory.size < LIVENESS_SMOOTHING_WINDOW) {
+                            1 // Force ANALYZING during warmup
+                        } else {
+                            livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
+                        }
                         
                         // UX Dwell-Time Filter
                         if (votedStatus != displayedStatus) {
@@ -444,6 +453,7 @@ class MainActivity : AppCompatActivity() {
                             nosePositions.clear()
                             isMicroMotionLive.value = true
                             isFaceDetectedState.value = false
+                            isAnalysisReadyState.value = false // Reset latch
                             bpmState.value = 0.0
                             snrState.value = 0.0
                             livenessStatusState.intValue = 1
@@ -451,7 +461,7 @@ class MainActivity : AppCompatActivity() {
                             pendingStatusFrames = 0
                             bufferSizeState.value = 0.0
                             signalState.value = DoubleArray(0)
-                            coastingFrames++ // Past max to only reset once
+                            coastingFrames = MAX_COASTING_FRAMES + 1 // Sentinel: don't re-enter
                         }
                     }
                 }
