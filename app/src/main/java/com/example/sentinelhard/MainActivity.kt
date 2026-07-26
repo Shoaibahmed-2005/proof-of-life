@@ -3,10 +3,11 @@ package com.example.sentinelhard
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.PointF
+import android.graphics.RectF
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
-import android.util.Size
+import android.util.Size as AndroidSize
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -33,6 +34,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size as ComposeSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
@@ -40,7 +43,29 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import org.opencv.android.OpenCVLoader
+import com.example.sentinelhard.camera.QrCodeAnalyzer
+import com.example.sentinelhard.models.BiometricPayload
+import com.example.sentinelhard.models.VerifyRequest
+import com.example.sentinelhard.network.ApiClient
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.*
 import java.util.concurrent.Executors
+
+sealed class AuthState {
+    object SelectionMenu : AuthState()
+    object ScanQr : AuthState()
+    data class MeasureBiometrics(val sessionId: String) : AuthState()
+    object LivenessVerified : AuthState()
+    object Submitting : AuthState()
+    data class Success(val message: String) : AuthState()
+    data class Error(val message: String) : AuthState()
+}
 
 class MainActivity : AppCompatActivity() {
 
@@ -54,6 +79,15 @@ class MainActivity : AppCompatActivity() {
     private val bufferSizeState = mutableStateOf(0.0)
     private val isFaceDetectedState = mutableStateOf(false)
     private val isAnalysisReadyState = mutableStateOf(false)
+
+    // ROI debug overlay state
+    private val foreheadRoiState = mutableStateOf<RectF?>(null)
+    private val roiImageWidth = mutableIntStateOf(0)
+    private val roiImageHeight = mutableIntStateOf(0)
+
+    // QR scanning phase state
+    private val authState = mutableStateOf<AuthState>(AuthState.SelectionMenu)
+    private val cryptoManager = CryptoManager()
 
     private val livenessHistory = mutableListOf<Int>()
     private val LIVENESS_SMOOTHING_WINDOW = 15
@@ -77,6 +111,17 @@ class MainActivity : AppCompatActivity() {
     private var hasFaceLost = false
 
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val telemetryStreamer = TelemetryStreamer()
+    private var telemetryFrameCounter = 0
+
+    // Thermal optimization: throttle to 20 FPS
+    private var lastProcessedTimeMs = 0L
+    private val frameIntervalMs = 50L  // 1000 / 20 FPS
+
+    // Decoupled face detection: run ML Kit every 3rd frame, JNI every frame
+    private var mlKitFrameCounter = 0
+    @Volatile private var isDetectingFace = false
+    private val ML_KIT_INTERVAL = 3
 
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
@@ -108,15 +153,118 @@ class MainActivity : AppCompatActivity() {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
 
+        cryptoManager.generateHardwareKey()
+
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF0A0A0A)
                 ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        CameraPreview(modifier = Modifier.fillMaxSize())
-                        HUDOverlay()
+                    val currentAuthState by authState
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        
+                        if (currentAuthState != AuthState.SelectionMenu) {
+                            CameraPreview(modifier = Modifier.fillMaxSize())
+                        }
+                        
+                        when (val state = currentAuthState) {
+                            is AuthState.SelectionMenu -> {
+                                SelectionMenuUI(
+                                    onPhoneLogin = {
+                                        val localSessionId = "phone_session_${System.currentTimeMillis()}"
+                                        authState.value = AuthState.MeasureBiometrics(localSessionId)
+                                    },
+                                    onDesktopLogin = {
+                                        authState.value = AuthState.ScanQr
+                                    }
+                                )
+                            }
+                            is AuthState.ScanQr -> {
+                                Text(
+                                    text = "Scanning QR Code...",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 32.dp)
+                                )
+                            }
+                            is AuthState.MeasureBiometrics -> {
+                                ForeheadRoiOverlay()
+                                HUDOverlay()
+                            }
+                            is AuthState.LivenessVerified -> {
+                                StatusOverlayUI(
+                                    message = "Liveness Verified",
+                                    color = Color(0xFF00FF66),
+                                    icon = "✓"
+                                )
+                            }
+                            is AuthState.Submitting -> {
+                                StatusOverlayUI(
+                                    message = "Submitting Biometrics...",
+                                    color = Color.Yellow,
+                                    showProgress = true
+                                )
+                            }
+                            is AuthState.Success -> {
+                                StatusOverlayUI(
+                                    message = state.message,
+                                    color = Color(0xFF00FF66),
+                                    icon = "✓",
+                                    showCloseButton = true
+                                )
+                            }
+                            is AuthState.Error -> {
+                                StatusOverlayUI(
+                                    message = state.message,
+                                    color = Color.Red,
+                                    icon = "!",
+                                    showCloseButton = true
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun StatusOverlayUI(
+        message: String,
+        color: Color,
+        icon: String? = null,
+        showProgress: Boolean = false,
+        showCloseButton: Boolean = false
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.8f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (showProgress) {
+                    CircularProgressIndicator(color = color, modifier = Modifier.size(64.dp))
+                } else if (icon != null) {
+                    Text(text = icon, color = color, fontSize = 64.sp, fontWeight = FontWeight.Bold)
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Text(
+                    text = message,
+                    color = color,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
+
+                if (showCloseButton) {
+                    Spacer(modifier = Modifier.height(32.dp))
+                    Button(onClick = { authState.value = AuthState.SelectionMenu }) {
+                        Text("Return to Menu")
                     }
                 }
             }
@@ -134,50 +282,142 @@ class MainActivity : AppCompatActivity() {
                 val previewView = PreviewView(ctx)
                 cameraProviderFuture.addListener({
                     val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
-
-                    val resolutionSelector = ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(
-                                Size(640, 480),
-                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                            )
-                        )
-                        .build()
-
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setResolutionSelector(resolutionSelector)
-                        .build()
-
-                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                        analyzeFrame(imageProxy)
-                    }
-
-                    val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-                    try {
-                        cameraProvider.unbindAll()
-                        val camera = cameraProvider.bindToLifecycle(
-                            lifecycleOwner, cameraSelector, preview, imageAnalysis
-                        )
-                        
-                        camera.cameraControl.let { control ->
-                            val exposureState = camera.cameraInfo.exposureState
-                            if (exposureState.isExposureCompensationSupported) {
-                                control.setExposureCompensationIndex(0)
-                            }
-                        }
-                    } catch (exc: Exception) {
-                        Log.e("SentinelHard", "Use case binding failed", exc)
+                    val state = authState.value
+                    if (state is AuthState.ScanQr) {
+                        bindQrScanner(cameraProvider, previewView, lifecycleOwner)
+                    } else if (state is AuthState.MeasureBiometrics) {
+                        bindRppgPipeline(cameraProvider, previewView, lifecycleOwner)
                     }
                 }, ContextCompat.getMainExecutor(context))
                 previewView
             },
             modifier = modifier
         )
+    }
+
+    private fun bindQrScanner(
+        cameraProvider: ProcessCameraProvider,
+        previewView: PreviewView,
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    ) {
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        // 720p is plenty for QR code recognition
+        val qrResolution = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    AndroidSize(1280, 720),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
+        val qrAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(qrResolution)
+            .build()
+
+        qrAnalysis.setAnalyzer(cameraExecutor, QrCodeAnalyzer { rawQrString ->
+            Log.i("SentinelHard", "QR Scanned: $rawQrString")
+            val sessionId = parseSessionId(rawQrString)
+            
+            runOnUiThread {
+                authState.value = AuthState.MeasureBiometrics(sessionId)
+            }
+
+            // Transition: unbind QR, bind rPPG pipeline
+            cameraProvider.unbindAll()
+            bindRppgPipeline(cameraProvider, previewView, lifecycleOwner)
+        })
+
+        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+        try {
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, qrAnalysis)
+        } catch (exc: Exception) {
+            Log.e("SentinelHard", "QR scanner binding failed", exc)
+        }
+    }
+
+    private fun bindRppgPipeline(
+        cameraProvider: ProcessCameraProvider,
+        previewView: PreviewView,
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    ) {
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    AndroidSize(640, 480),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(resolutionSelector)
+            .build()
+
+        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+            analyzeFrame(imageProxy)
+        }
+
+        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+        try {
+            cameraProvider.unbindAll()
+            val camera = cameraProvider.bindToLifecycle(
+                lifecycleOwner, cameraSelector, preview, imageAnalysis
+            )
+
+            camera.cameraControl.let { control ->
+                val exposureState = camera.cameraInfo.exposureState
+                if (exposureState.isExposureCompensationSupported) {
+                    control.setExposureCompensationIndex(0)
+                }
+            }
+        } catch (exc: Exception) {
+            Log.e("SentinelHard", "rPPG pipeline binding failed", exc)
+        }
+    }
+
+    @Composable
+    fun SelectionMenuUI(onPhoneLogin: () -> Unit, onDesktopLogin: () -> Unit) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Button(
+                onClick = onPhoneLogin,
+                modifier = Modifier
+                    .width(250.dp)
+                    .padding(bottom = 16.dp)
+            ) {
+                Text("Login Directly on Phone")
+            }
+
+            Button(
+                onClick = onDesktopLogin,
+                modifier = Modifier.width(250.dp)
+            ) {
+                Text("Scan Desktop QR Code")
+            }
+        }
+    }
+
+    private fun parseSessionId(rawString: String): String {
+        return try {
+            val json = JSONObject(rawString)
+            json.optString("session_id", rawString)
+        } catch (e: Exception) {
+            rawString
+        }
     }
 
     @Composable
@@ -283,6 +523,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Composable
+    fun ForeheadRoiOverlay() {
+        val roiRect by foreheadRoiState
+        val imgWidth by roiImageWidth
+        val imgHeight by roiImageHeight
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val rect = roiRect ?: return@Canvas
+            if (imgWidth == 0 || imgHeight == 0) return@Canvas
+
+            val scaleX = size.width / imgWidth.toFloat()
+            val scaleY = size.height / imgHeight.toFloat()
+
+            // Mirror X-axis for front-facing camera
+            val left = size.width - rect.right * scaleX
+            val right = size.width - rect.left * scaleX
+            val top = rect.top * scaleY
+            val bottom = rect.bottom * scaleY
+
+            drawRect(
+                color = Color(0xFF00FF66),
+                topLeft = Offset(left, top),
+                size = ComposeSize(right - left, bottom - top),
+                style = Stroke(width = 4f)
+            )
+        }
+    }
+
+    @Composable
     fun MetricItem(label: String, value: String, unit: String, color: Color) {
         Column {
             Text(text = label, color = color.copy(alpha = 0.7f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -334,146 +602,271 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @OptIn(ExperimentalGetImage::class)
-    fun analyzeFrame(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image ?: return
-        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-        val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
-        val timestampSeconds = imageProxy.imageInfo.timestamp / 1_000_000_000.0
+    /**
+     * Processes heart metrics from the C++ pipeline and updates all UI/telemetry state.
+     * Extracted to avoid duplication between ML Kit and cached-ROI frame paths.
+     */
+    private fun processMetrics() {
+        val metrics = extractHeartMetrics()
+        if (metrics.size == 4) {
+            bpmState.value = metrics[0]
+            snrState.value = metrics[1]
 
-        detector.process(image)
-            .addOnSuccessListener { faces ->
-                if (faces.isNotEmpty()) {
-                    coastingFrames = 0
-                    hasFaceLost = false  // clear after face re-detected
-                    isFaceDetectedState.value = true
+            // Liveness Hysteresis with Tiered Status (0, 1, 2)
+            val rawStatus = metrics[2].toInt()
+
+            // Apply Micro-Motion Override
+            val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
+
+            livenessHistory.add(finalRawStatus)
+            if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
+
+            // Bug 2 Fix: Gate voting behind warmup window
+            val votedStatus = if (livenessHistory.size < LIVENESS_SMOOTHING_WINDOW) {
+                1 // Force ANALYZING during warmup
+            } else {
+                livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
+            }
+
+            // UX Dwell-Time Filter
+            if (votedStatus != displayedStatus) {
+                pendingStatusFrames++
+                if (pendingStatusFrames >= MIN_DWELL_FRAMES) {
+                    displayedStatus = votedStatus
+                    pendingStatusFrames = 0
+                }
+            } else {
+                pendingStatusFrames = 0
+            }
+            livenessStatusState.intValue = displayedStatus
+
+            bufferSizeState.value = metrics[3]
+            // One-way latch: lock UI into Metrics view once buffer is primed
+            if (!isAnalysisReadyState.value && metrics[3] >= 150.0) {
+                isAnalysisReadyState.value = true
+            }
+
+            Log.i("SentinelTelemetry",
+                "Buffer: ${metrics[3].toInt()}/150 | " +
+                "Status: $displayedStatus | " +
+                "SNR: ${String.format("%.2f", metrics[1])} dB"
+            )
+
+            // Stream telemetry to server (~1 message/sec at 20 FPS)
+            telemetryFrameCounter++
+            if (telemetryFrameCounter >= 20) {
+                telemetryStreamer.sendTelemetry(
+                    bpm = metrics[0],
+                    snr = metrics[1],
+                    livenessStatus = displayedStatus
+                )
+                telemetryFrameCounter = 0
+            }
+
+            // --- Automatic Submission Trigger ---
+            val state = authState.value
+            if (state is AuthState.MeasureBiometrics && !hasFaceLost) {
+                if (displayedStatus == 2 && metrics[3] >= 150.0) {
+                    val sessionId = state.sessionId
+                    authState.value = AuthState.LivenessVerified
                     
-                    val face = faces.first()
-
-                    // --- Layer 3: ML Kit Micro-Motion Tracking ---
-                    val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
-                    if (noseBase != null) {
-                        if (nosePositions.size == 15) nosePositions.removeFirst()
-                        nosePositions.addLast(noseBase)
-
-                        if (nosePositions.size == 15) {
-                            val varianceX = calculateVariance(nosePositions.map { it.x })
-                            val varianceY = calculateVariance(nosePositions.map { it.y })
-                            isMicroMotionLive.value = (varianceX > 0.1f || varianceY > 0.1f)
-                        }
-                    }
-
-                    val bounds = face.boundingBox
-                    val roiWidth = (bounds.width() * 0.45).toInt()
-                    val roiLeft = bounds.centerX() - (roiWidth / 2)
-                    val roiHeight = (bounds.height() * 0.20).toInt()
-                    val roiTop = bounds.top + (bounds.height() * 0.10).toInt()
-
-                    val (mappedX, mappedY, mappedW, mappedH) = mapRoiToSensor(
-                        roiLeft, roiTop, roiWidth, roiHeight,
-                        imageProxy.width, imageProxy.height, rotationDegrees
-                    )
-
-                    val yuvData = yuvToByteArray(imageProxy)
-                    
-                    // Cache valid frame data for coasting
-                    lastGoodYuv = yuvData
-                    lastGoodRoi = intArrayOf(mappedX, mappedY, mappedW, mappedH)
-                    lastGoodWidth = imageProxy.width
-                    lastGoodHeight = imageProxy.height
-                    
-                    // Normal Frame Processing
-                    signalState.value = processFrame(
-                        yuvData, imageProxy.width, imageProxy.height,
-                        mappedX, mappedY, mappedW, mappedH,
-                        timestampSeconds
-                    )
-
-                    val metrics = extractHeartMetrics()
-                    if (metrics.size == 4) {
-                        bpmState.value = metrics[0]
-                        snrState.value = metrics[1]
-                        
-                        // Liveness Hysteresis with Tiered Status (0, 1, 2)
-                        val rawStatus = metrics[2].toInt()
-                        
-                        // Apply Micro-Motion Override
-                        val finalRawStatus = if (isMicroMotionLive.value) rawStatus else if (rawStatus == 2) 1 else rawStatus
-                        
-                        livenessHistory.add(finalRawStatus)
-                        if (livenessHistory.size > LIVENESS_SMOOTHING_WINDOW) livenessHistory.removeAt(0)
-                        
-                        // Bug 2 Fix: Gate voting behind warmup window
-                        val votedStatus = if (livenessHistory.size < LIVENESS_SMOOTHING_WINDOW) {
-                            1 // Force ANALYZING during warmup
-                        } else {
-                            livenessHistory.groupBy { it }.maxByOrNull { it.value.size }?.key ?: 1
-                        }
-                        
-                        // UX Dwell-Time Filter
-                        if (votedStatus != displayedStatus) {
-                            pendingStatusFrames++
-                            if (pendingStatusFrames >= MIN_DWELL_FRAMES) {
-                                displayedStatus = votedStatus
-                                pendingStatusFrames = 0
-                            }
-                        } else {
-                            pendingStatusFrames = 0
-                        }
-                        livenessStatusState.intValue = displayedStatus
-                        
-                        bufferSizeState.value = metrics[3]
-                        // One-way latch: lock UI into Metrics view once buffer is primed
-                        // (Moved here from inside HUDOverlay Composable — mutating state inside
-                        //  a Composable causes illegal recomposition side-effects)
-                        if (!isAnalysisReadyState.value && metrics[3] >= 150.0) {
-                            isAnalysisReadyState.value = true
-                        }
-
-                        Log.i("SentinelTelemetry", 
-                            "Buffer: ${metrics[3].toInt()}/150 | " +
-                            "Coasting: false | " +
-                            "Status: $displayedStatus | " +
-                            "SNR: ${String.format("%.2f", metrics[1])} dB"
-                        )
-                    }
-                } else {
-                    // Face Lost: Coasting Logic
-                    val yuv = lastGoodYuv
-                    val roi = lastGoodRoi
-                    if (!hasFaceLost && coastingFrames < MAX_COASTING_FRAMES && yuv != null && roi != null) {
-                        coastingFrames++
-                        
-                        // Inject last known good data to keep buffer continuous
-                        signalState.value = processFrame(
-                            yuv, lastGoodWidth, lastGoodHeight,
-                            roi[0], roi[1], roi[2], roi[3],
-                            timestampSeconds
-                        )
-                        
-                        Log.d("SentinelDSP", "Coasting frame $coastingFrames / $MAX_COASTING_FRAMES | Injecting Duplicate Data")
-                    } else if (!hasFaceLost && coastingFrames >= MAX_COASTING_FRAMES) {
-                        Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
-                        hasFaceLost = true  // prevent re-entry without a boolean sentinel hack
-                        resetBuffers()
-                        livenessHistory.clear()
-                        nosePositions.clear()
-                        isMicroMotionLive.value = true
-                        isFaceDetectedState.value = false
-                        isAnalysisReadyState.value = false // Reset latch
-                        bpmState.value = 0.0
-                        snrState.value = 0.0
-                        livenessStatusState.intValue = 1
-                        displayedStatus = 1
-                        pendingStatusFrames = 0
-                        bufferSizeState.value = 0.0
-                        signalState.value = DoubleArray(0)
+                    lifecycleScope.launch {
+                        delay(1200) // Visual handshake delay
+                        submitAuthentication(sessionId)
                     }
                 }
             }
-            .addOnCompleteListener {
-                imageProxy.close()
+        }
+    }
+
+    private fun submitAuthentication(sessionId: String) {
+        authState.value = AuthState.Submitting
+        
+        lifecycleScope.launch {
+            try {
+                // 1. Construct BiometricPayload
+                val deviceId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+                val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                // Calculate combined variance as a proxy for micro-motion liveness
+                val varianceX = calculateVariance(nosePositions.map { it.x })
+                val varianceY = calculateVariance(nosePositions.map { it.y })
+                val totalVariance = (varianceX + varianceY).toDouble()
+
+                val payloadObj = BiometricPayload(
+                    sessionId = sessionId,
+                    bpm = bpmState.value,
+                    timestamp = timestamp,
+                    deviceId = deviceId,
+                    snr = snrState.value,
+                    variance = totalVariance
+                )
+
+                val payloadJson = Json.encodeToString(payloadObj)
+                
+                // 2. Sign with CryptoManager
+                if (!cryptoManager.hasKey()) {
+                    cryptoManager.generateHardwareKey()
+                }
+                
+                val signature = cryptoManager.signPayload(payloadJson)
+                val publicKey = cryptoManager.getBase64PublicKey()
+                val attestationChain = cryptoManager.getAttestationChain()
+
+                val verifyRequest = VerifyRequest(
+                    payload = android.util.Base64.encodeToString(payloadJson.toByteArray(), android.util.Base64.NO_WRAP),
+                    signature = signature,
+                    publicKey = publicKey,
+                    attestationChain = attestationChain
+                )
+
+                // 3. Submit via Retrofit
+                val response = ApiClient.apiService.verifyBiometrics(verifyRequest)
+                
+                if (response.isSuccessful && response.body()?.authenticated == true) {
+                    authState.value = AuthState.Success(response.body()?.message ?: "Authenticated Successfully")
+                } else {
+                    val errorMsg = response.body()?.message ?: "Verification Failed"
+                    authState.value = AuthState.Error(errorMsg)
+                }
+            } catch (e: Exception) {
+                Log.e("SentinelHard", "Auth Submission Error", e)
+                authState.value = AuthState.Error(e.message ?: "Network Error")
             }
+        }
+    }
+
+    @OptIn(ExperimentalGetImage::class)
+    fun analyzeFrame(imageProxy: ImageProxy) {
+        // Temporal downsampling: skip frames beyond 20 FPS to reduce CPU/thermal load
+        val currentTimeMs = System.currentTimeMillis()
+        if (currentTimeMs - lastProcessedTimeMs < frameIntervalMs) {
+            imageProxy.close()
+            return
+        }
+        lastProcessedTimeMs = currentTimeMs
+
+        val mediaImage = imageProxy.image
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
+        }
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        val timestampSeconds = imageProxy.imageInfo.timestamp / 1_000_000_000.0
+
+        // Copy YUV data while proxy is open (independent of proxy after this)
+        val yuvData = yuvToByteArray(imageProxy)
+        val imgWidth = imageProxy.width
+        val imgHeight = imageProxy.height
+
+        // === JNI Processing: runs EVERY frame with cached ROI ===
+        // This gives the C++ POS/FFT pipeline a continuous 20 FPS signal
+        // even though ML Kit face detection only runs at ~7 FPS.
+        val roi = lastGoodRoi
+        if (roi != null && isFaceDetectedState.value && !hasFaceLost) {
+            signalState.value = processFrame(
+                yuvData, lastGoodWidth, lastGoodHeight,
+                roi[0], roi[1], roi[2], roi[3],
+                timestampSeconds
+            )
+            processMetrics()
+        }
+
+        // === ML Kit Face Detection: runs every 3rd frame only ===
+        // Saves ~66% of ML Kit CPU cost while keeping ROI fresh enough
+        mlKitFrameCounter++
+        if (mlKitFrameCounter % ML_KIT_INTERVAL == 0 && !isDetectingFace) {
+            isDetectingFace = true
+            val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+
+            detector.process(image)
+                .addOnSuccessListener { faces ->
+                    if (faces.isNotEmpty()) {
+                        coastingFrames = 0
+                        hasFaceLost = false
+                        // Connect telemetry WebSocket on first face lock-on
+                        if (!isFaceDetectedState.value) {
+                            telemetryStreamer.connect()
+                        }
+                        isFaceDetectedState.value = true
+
+                        val face = faces.first()
+
+                        // --- Layer 3: ML Kit Micro-Motion Tracking ---
+                        val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+                        if (noseBase != null) {
+                            if (nosePositions.size == 15) nosePositions.removeFirst()
+                            nosePositions.addLast(noseBase)
+
+                            if (nosePositions.size == 15) {
+                                val varianceX = calculateVariance(nosePositions.map { it.x })
+                                val varianceY = calculateVariance(nosePositions.map { it.y })
+                                isMicroMotionLive.value = (varianceX > 0.1f || varianceY > 0.1f)
+                            }
+                        }
+
+                        // Update cached ROI for JNI processing on subsequent frames
+                        val bounds = face.boundingBox
+                        val roiWidth = (bounds.width() * 0.45).toInt()
+                        val roiLeft = bounds.centerX() - (roiWidth / 2)
+                        val roiHeight = (bounds.height() * 0.20).toInt()
+                        val roiTop = bounds.top + (bounds.height() * 0.10).toInt()
+
+                        // Debug overlay
+                        foreheadRoiState.value = RectF(
+                            roiLeft.toFloat(), roiTop.toFloat(),
+                            (roiLeft + roiWidth).toFloat(), (roiTop + roiHeight).toFloat()
+                        )
+                        val effectiveWidth = if (rotationDegrees == 90 || rotationDegrees == 270) imgHeight else imgWidth
+                        val effectiveHeight = if (rotationDegrees == 90 || rotationDegrees == 270) imgWidth else imgHeight
+                        roiImageWidth.intValue = effectiveWidth
+                        roiImageHeight.intValue = effectiveHeight
+
+                        // Cache mapped ROI for use by JNI on every frame
+                        val (mappedX, mappedY, mappedW, mappedH) = mapRoiToSensor(
+                            roiLeft, roiTop, roiWidth, roiHeight,
+                            imgWidth, imgHeight, rotationDegrees
+                        )
+                        lastGoodRoi = intArrayOf(mappedX, mappedY, mappedW, mappedH)
+                        lastGoodWidth = imgWidth
+                        lastGoodHeight = imgHeight
+
+                    } else {
+                        // Face lost — count coasting (scaled by detection interval)
+                        if (!hasFaceLost) {
+                            coastingFrames += ML_KIT_INTERVAL
+                            if (coastingFrames >= MAX_COASTING_FRAMES) {
+                                Log.w("SentinelDSP", "Grace period exceeded. Resetting.")
+                                hasFaceLost = true
+                                resetBuffers()
+                                telemetryStreamer.disconnect()
+                                telemetryFrameCounter = 0
+                                livenessHistory.clear()
+                                nosePositions.clear()
+                                isMicroMotionLive.value = true
+                                foreheadRoiState.value = null
+                                isFaceDetectedState.value = false
+                                isAnalysisReadyState.value = false
+                                bpmState.value = 0.0
+                                snrState.value = 0.0
+                                livenessStatusState.intValue = 1
+                                displayedStatus = 1
+                                pendingStatusFrames = 0
+                                bufferSizeState.value = 0.0
+                                signalState.value = DoubleArray(0)
+                            }
+                        }
+                    }
+                }
+                .addOnCompleteListener {
+                    isDetectingFace = false
+                    imageProxy.close()
+                }
+        } else {
+            imageProxy.close()
+        }
     }
 
     private fun mapRoiToSensor(
@@ -536,6 +929,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        telemetryStreamer.shutdown()
         cameraExecutor.shutdown()
         detector.close()
     }
