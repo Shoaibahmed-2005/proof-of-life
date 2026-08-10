@@ -33,7 +33,11 @@ async def telemetry_endpoint(websocket: WebSocket) -> None:
     try:
         while True:
             data = await websocket.receive_text()
-            telemetry = json.loads(data)
+            try:
+                telemetry = json.loads(data)
+            except json.JSONDecodeError as exc:
+                logger.warning("[Telemetry] Invalid JSON received: %s", exc)
+                continue
 
             bpm = telemetry.get("bpm", 0.0)
             snr = telemetry.get("snr", 0.0)
@@ -42,7 +46,8 @@ async def telemetry_endpoint(websocket: WebSocket) -> None:
             status_label = {0: "SPOOF", 1: "ANALYZING", 2: "HUMAN"}.get(liveness_status, "UNKNOWN")
 
             logger.info(
-                f"[Telemetry] BPM: {bpm:.1f} | SNR: {snr:.2f} | Liveness: {status_label} ({liveness_status})"
+                "[Telemetry] BPM: %.1f | SNR: %.2f | Liveness: %s (%s)",
+                bpm, snr, status_label, liveness_status,
             )
 
             await websocket.send_text(json.dumps({
@@ -53,7 +58,7 @@ async def telemetry_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.error(f"[Error] WebSocket Exception: {e}")
+        logger.error("[Telemetry] WebSocket exception: %s", e)
 
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:

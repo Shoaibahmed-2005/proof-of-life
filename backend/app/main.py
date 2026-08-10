@@ -29,6 +29,11 @@ async def lifespan(app: FastAPI):
     """Manage startup and shutdown events."""
     # ── Startup ─────────────────────────────────────────────────────────
     logger.info("Starting %s...", settings.PROJECT_NAME)
+    if settings.SECRET_KEY == "secret-key-change-me-in-production":
+        logger.warning(
+            "[SECURITY] SECRET_KEY is set to the default development value. "
+            "Set a strong random key in your .env file before deploying to production."
+        )
     session_manager.start_background_cleanup(interval_seconds=60)
     logger.info("Session cleanup task started (60s interval)")
     yield

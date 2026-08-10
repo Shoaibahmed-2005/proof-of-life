@@ -35,7 +35,6 @@ async def create_session(_body: SessionCreate | None = None) -> SessionResponse:
     """
     session = session_manager.create_session()
     logger.info("New session created: %s", session.session_id)
-    print(f"session-id={session.session_id}")
 
     return SessionResponse(
         session_id=session.session_id,

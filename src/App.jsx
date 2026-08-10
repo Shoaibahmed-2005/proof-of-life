@@ -1,21 +1,21 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Shield, 
-  Smartphone, 
-  ArrowRight, 
-  RefreshCw, 
-  CheckCircle2, 
-  Lock, 
-  UserCheck, 
-  LogOut, 
-  Activity, 
-  CreditCard, 
-  Send, 
-  History, 
-  Bell, 
-  AlertCircle, 
-  Wifi, 
-  WifiOff, 
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Shield,
+  Smartphone,
+  ArrowRight,
+  RefreshCw,
+  CheckCircle2,
+  Lock,
+  UserCheck,
+  LogOut,
+  Activity,
+  CreditCard,
+  Send,
+  History,
+  Bell,
+  AlertCircle,
+  Wifi,
+  WifiOff,
   ChevronRight,
   ShieldCheck,
   Cpu
@@ -24,6 +24,11 @@ import { QRCodeSVG } from 'qrcode.react';
 
 const API_BASE_URL = 'http://localhost:8080/api/v1';
 const WS_BASE_URL = 'ws://localhost:8080/api/v1/ws';
+
+// Number of WebSocket reconnect attempts before giving up and entering standalone mode.
+const WS_MAX_RETRIES = 3;
+// Heartbeat interval in ms — keeps the connection alive through proxies / NAT.
+const WS_HEARTBEAT_INTERVAL_MS = 30_000;
 
 export default function App() {
   const [appStep, setAppStep] = useState(1);
@@ -34,51 +39,67 @@ export default function App() {
   const [authData, setAuthData] = useState(null);
   const [countdown, setCountdown] = useState(300);
   const [isStandalone, setIsStandalone] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   const wsRef = useRef(null);
   const timerRef = useRef(null);
+  const heartbeatRef = useRef(null);
+  const retryCountRef = useRef(0);
+  const retryTimeoutRef = useRef(null);
+  // Use a ref so ws.onclose always reads the current step, not a stale closure.
+  const appStepRef = useRef(appStep);
+  useEffect(() => { appStepRef.current = appStep; }, [appStep]);
 
-  // Clean up WebSocket and timers on unmount
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
+  // ── Teardown helper ──────────────────────────────────────────────
+  const closeAll = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // prevent reconnect loop on manual close
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    clearInterval(timerRef.current);
+    clearInterval(heartbeatRef.current);
+    clearTimeout(retryTimeoutRef.current);
   }, []);
 
-  // Handle countdown timer for active sessions
+  // Clean up on unmount
+  useEffect(() => () => closeAll(), [closeAll]);
+
+  // ── Countdown timer for active QR screen ────────────────────────
   useEffect(() => {
     if (appStep === 2 && sessionId) {
       setCountdown(300);
+      setSessionExpired(false);
       timerRef.current = setInterval(() => {
         setCountdown((prev) => {
           if (prev <= 1) {
             clearInterval(timerRef.current);
+            setSessionExpired(true);
             return 0;
           }
           return prev - 1;
         });
       }, 1000);
     } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
+      clearInterval(timerRef.current);
     }
-
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-    };
+    return () => clearInterval(timerRef.current);
   }, [appStep, sessionId]);
 
-  // Connect to FastAPI WebSocket
-  const connectWebSocket = (id) => {
+  // ── WebSocket heartbeat ping ─────────────────────────────────────
+  const startHeartbeat = useCallback((ws) => {
+    clearInterval(heartbeatRef.current);
+    heartbeatRef.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, WS_HEARTBEAT_INTERVAL_MS);
+  }, []);
+
+  // ── WebSocket connection with exponential-backoff retry ─────────
+  const connectWebSocket = useCallback((id, retryAttempt = 0) => {
     if (wsRef.current) {
+      wsRef.current.onclose = null;
       wsRef.current.close();
     }
 
@@ -92,8 +113,10 @@ export default function App() {
 
       ws.onopen = () => {
         console.log('[WebSocket] Connection opened for session:', id);
+        retryCountRef.current = 0;
         setWsStatus('connected');
         setIsStandalone(false);
+        startHeartbeat(ws);
       };
 
       ws.onmessage = (event) => {
@@ -104,14 +127,12 @@ export default function App() {
           if (data.event === 'CONNECTED') {
             setWsStatus('connected');
           } else if (data.event === 'ACCESS_GRANTED') {
-            // Day 3: Received Access Granted signal over WebSocket!
             console.log('[WebSocket] Access granted!', data);
             setAuthData({
               bpm: data.bpm || 74,
               deviceId: data.device_id || 'Pixel 7 (Titan M2)',
               grantedAt: data.granted_at || new Date().toISOString()
             });
-            // Transition from QR code screen to Account Dashboard
             setAppStep(3);
           }
         } catch (err) {
@@ -120,16 +141,31 @@ export default function App() {
       };
 
       ws.onerror = (err) => {
-        console.warn('[WebSocket] Error encountered (backend might be offline):', err);
-        setWsStatus('error');
-        setWsError('Could not reach backend WebSocket. Standalone mode available.');
-        setIsStandalone(true);
+        console.warn('[WebSocket] Error (backend might be offline):', err);
+        // onclose will fire next and handle reconnect logic
       };
 
       ws.onclose = (event) => {
         console.log('[WebSocket] Connection closed:', event.code, event.reason);
-        if (appStep === 2) {
-          setWsStatus('disconnected');
+        clearInterval(heartbeatRef.current);
+
+        // Only attempt reconnect while still on the QR screen
+        if (appStepRef.current !== 2) return;
+
+        const attempt = retryCountRef.current;
+        if (attempt < WS_MAX_RETRIES) {
+          const backoffMs = Math.min(1000 * 2 ** attempt, 8000); // 1s, 2s, 4s, 8s cap
+          retryCountRef.current += 1;
+          console.log(
+            `[WebSocket] Reconnect attempt ${attempt + 1}/${WS_MAX_RETRIES} in ${backoffMs}ms`
+          );
+          setWsStatus('connecting');
+          retryTimeoutRef.current = setTimeout(() => connectWebSocket(id, attempt + 1), backoffMs);
+        } else {
+          console.warn('[WebSocket] Max retries reached — falling back to standalone mode');
+          setWsStatus('error');
+          setWsError('Could not reach backend. Standalone simulation mode active.');
+          setIsStandalone(true);
         }
       };
     } catch (err) {
@@ -137,15 +173,17 @@ export default function App() {
       setWsStatus('error');
       setIsStandalone(true);
     }
-  };
+  }, [startHeartbeat]);
 
-  // Day 2: Connect to backend, fetch session ID via POST /sessions & initialize WebSocket
-  const startLoginFlow = async () => {
+  // ── Create session + connect WebSocket ───────────────────────────
+  const startLoginFlow = useCallback(async () => {
+    closeAll();
+    retryCountRef.current = 0;
     setLoading(true);
     setWsError('');
+    setSessionExpired(false);
 
     try {
-      // 1. Attempt to fetch Session ID from FastAPI backend POST /sessions
       const response = await fetch(`${API_BASE_URL}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -157,37 +195,33 @@ export default function App() {
         setSessionId(activeSessionId);
         setAppStep(2);
         setLoading(false);
-        // Connect WebSocket to FastAPI server
         connectWebSocket(activeSessionId);
       } else {
         throw new Error(`Server returned HTTP ${response.status}`);
       }
     } catch (error) {
-      console.warn('[Session API] Fallback to standalone session generator:', error.message);
-      // Fallback session ID for standalone mode
+      console.warn('[Session API] Fallback to standalone session:', error.message);
       const fallbackId = 'SENTINEL-IND-' + Math.random().toString(36).substring(2, 9).toUpperCase();
       setSessionId(fallbackId);
       setIsStandalone(true);
       setAppStep(2);
       setLoading(false);
-      // Attempt WebSocket anyway
       connectWebSocket(fallbackId);
     }
-  };
+  }, [closeAll, connectWebSocket]);
 
-  // Refresh QR code session
-  const handleRefreshQR = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+  const handleRefreshQR = useCallback(() => {
     startLoginFlow();
-  };
+  }, [startLoginFlow]);
 
-  // Day 3: Simulation trigger for live unlock (works with backend verify endpoint or standalone test)
-  const simulateMobileApproval = async () => {
+  // ── Simulation trigger (DEV / DEMO ONLY) ────────────────────────
+  // This sends a mock payload that uses Math.random()-based mock signatures
+  // which will ALWAYS fail real ECDSA verification on the backend.
+  // Remove or gate this behind a dev flag before production deployment.
+  /* SIMULATION ONLY — NOT FOR PRODUCTION */
+  const simulateMobileApproval = useCallback(async () => {
     setLoading(true);
 
-    // If connected to WebSocket, try to call backend verify endpoint or trigger access grant
     try {
       const mockBpm = Math.floor(Math.random() * (95 - 65 + 1)) + 65;
       const verifyPayload = {
@@ -195,12 +229,13 @@ export default function App() {
           session_id: sessionId,
           bpm: mockBpm,
           timestamp: new Date().toISOString(),
-          device_id: "Pixel 7 Pro (Titan M2)",
+          device_id: 'Pixel 7 Pro (Titan M2)',
           snr: 5.8,
           variance: 1.2
         })),
-        signature: btoa("mock_ecdsa_signature_" + Math.random()),
-        public_key: btoa("mock_public_key_" + Math.random())
+        /* mock_ecdsa — will fail real signature verification on the backend */
+        signature: btoa('mock_ecdsa_signature_' + Math.random()),
+        public_key: btoa('mock_public_key_' + Math.random())
       };
 
       const response = await fetch(`${API_BASE_URL}/auth/verify`, {
@@ -212,10 +247,9 @@ export default function App() {
       if (response.ok) {
         const result = await response.json();
         if (result.status === 'ACCESS_GRANTED') {
-          // Backend will broadcast ACCESS_GRANTED over WS, but fallback state update:
           setAuthData({
             bpm: mockBpm,
-            deviceId: "Pixel 7 Pro (Titan M2)",
+            deviceId: 'Pixel 7 Pro (Titan M2)',
             grantedAt: new Date().toISOString()
           });
           setTimeout(() => {
@@ -226,10 +260,10 @@ export default function App() {
         }
       }
     } catch (err) {
-      console.log('[Simulation] Backend verify endpoint fallback:', err.message);
+      console.log('[Simulation] Backend verify endpoint unreachable — standalone fallback:', err.message);
     }
 
-    // Standalone fallback delay
+    // Standalone simulation fallback
     setTimeout(() => {
       setLoading(false);
       setAuthData({
@@ -239,17 +273,17 @@ export default function App() {
       });
       setAppStep(3);
     }, 1000);
-  };
+  }, [sessionId]);
 
-  const handleLogout = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+  const handleLogout = useCallback(() => {
+    closeAll();
     setAppStep(1);
     setSessionId('');
     setAuthData(null);
     setWsStatus('disconnected');
-  };
+    setIsStandalone(false);
+    setSessionExpired(false);
+  }, [closeAll]);
 
   const formatCountdown = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -259,8 +293,8 @@ export default function App() {
 
   return (
     <div style={{ minHeight: '100vh', width: '100vw', margin: 0, backgroundColor: '#0A0E17', color: '#F8FAFC', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
-      
-      {/* Navigation Header (Day 1 UI Bootstrap) */}
+
+      {/* Navigation Header */}
       <header style={{ width: '100%', background: '#1E293B', borderBottom: '1px solid #334155', padding: '16px 36px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxSizing: 'border-box', position: 'sticky', top: 0, zIndex: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
           <div style={{ background: '#0F172A', padding: '10px', borderRadius: '10px', border: '1px solid #38BDF8', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -300,8 +334,9 @@ export default function App() {
           )}
 
           {appStep === 3 && (
-            <button 
+            <button
               onClick={handleLogout}
+              aria-label="End secure banking session and return to login"
               style={{ background: '#DC2626', border: 'none', borderRadius: '8px', padding: '10px 18px', color: '#F8FAFC', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.2s', boxShadow: '0 4px 12px rgba(220, 38, 38, 0.3)' }}
             >
               <LogOut style={{ width: '16px', height: '16px' }} /> End Session
@@ -310,21 +345,21 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Full-Width Content Area */}
+      {/* Main Content */}
       <main style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '36px 20px', boxSizing: 'border-box' }}>
-        
-        {/* STAGE 1: LOGIN LANDING SCREEN (Day 1) */}
+
+        {/* STAGE 1: LOGIN LANDING */}
         {appStep === 1 && (
           <div className="animate-fade-in" style={{ maxWidth: '800px', width: '100%', background: '#1E293B', borderRadius: '20px', border: '1px solid #334155', padding: '52px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)', boxSizing: 'border-box', textAlign: 'center' }}>
             <div style={{ display: 'inline-flex', padding: '22px', background: 'rgba(56, 189, 248, 0.1)', borderRadius: '50%', marginBottom: '28px', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
               <Lock style={{ width: '48px', height: '48px', color: '#38BDF8' }} />
             </div>
-            
+
             <h2 style={{ fontSize: '28px', fontWeight: '700', marginBottom: '14px', color: '#F8FAFC', letterSpacing: '-0.5px' }}>
               Cryptographic Netbanking Authentication
             </h2>
             <p style={{ color: '#94A3B8', fontSize: '15px', lineHeight: '1.6', maxWidth: '580px', margin: '0 auto 36px auto' }}>
-              Welcome to India’s next-generation passwordless netbanking portal. Authenticate seamlessly using your Android device’s Titan M2 hardware enclave and live cardiac biometric verification.
+              Welcome to India's next-generation passwordless netbanking portal. Authenticate seamlessly using your Android device's Titan M2 hardware enclave and live cardiac biometric verification.
             </p>
 
             {/* Feature Highlights Grid */}
@@ -347,14 +382,15 @@ export default function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#A855F7', fontWeight: '600', marginBottom: '6px' }}>
                   <ShieldCheck style={{ width: '18px', height: '18px' }} /> Zero Passwords
                 </div>
-                <div style={{ fontSize: '13px', color: '#94A3B8' }}>Immune to phishing, replay & credential theft</div>
+                <div style={{ fontSize: '13px', color: '#94A3B8' }}>Immune to phishing, replay &amp; credential theft</div>
               </div>
             </div>
 
-            <button 
+            <button
               onClick={startLoginFlow}
               disabled={loading}
               className="animate-pulse-glow"
+              aria-label="Initialize a new cryptographic authentication session"
               style={{ background: '#0284C7', color: '#FFF', border: 'none', borderRadius: '10px', padding: '18px 40px', fontSize: '17px', fontWeight: '700', cursor: loading ? 'wait' : 'pointer', display: 'inline-flex', alignItems: 'center', gap: '12px', boxShadow: '0 6px 20px rgba(2, 132, 199, 0.4)', transition: 'all 0.2s' }}
             >
               {loading ? (
@@ -370,19 +406,42 @@ export default function App() {
           </div>
         )}
 
-        {/* STAGE 2: QR CODE VERIFICATION & WEBSOCKET LISTENER (Day 2) */}
+        {/* STAGE 2: QR CODE VERIFICATION & WEBSOCKET LISTENER */}
         {appStep === 2 && (
-          <div className="animate-fade-in" style={{ maxWidth: '680px', width: '100%', background: '#1E293B', borderRadius: '20px', border: '1px solid #334155', padding: '40px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)', boxSizing: 'border-box' }}>
+          <div className="animate-fade-in" style={{ maxWidth: '680px', width: '100%', background: '#1E293B', borderRadius: '20px', border: '1px solid #334155', padding: '40px', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.7)', boxSizing: 'border-box', position: 'relative' }}>
+
+            {/* Session Expired Overlay */}
+            {sessionExpired && (
+              <div style={{
+                position: 'absolute', inset: 0, borderRadius: '20px', zIndex: 20,
+                background: 'rgba(10, 14, 23, 0.92)', backdropFilter: 'blur(6px)',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '18px'
+              }}>
+                <AlertCircle style={{ width: '48px', height: '48px', color: '#EF4444' }} />
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '18px', fontWeight: '700', color: '#F8FAFC', marginBottom: '8px' }}>Session Expired</div>
+                  <div style={{ fontSize: '14px', color: '#94A3B8' }}>The QR code has expired. Generate a fresh session to continue.</div>
+                </div>
+                <button
+                  onClick={handleRefreshQR}
+                  aria-label="Generate a new session and refresh the QR code"
+                  style={{ background: '#0284C7', border: 'none', borderRadius: '10px', padding: '14px 28px', color: '#FFF', fontSize: '15px', fontWeight: '700', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 4px 14px rgba(2, 132, 199, 0.4)', transition: 'all 0.2s' }}
+                >
+                  <RefreshCw style={{ width: '18px', height: '18px' }} /> Refresh Session
+                </button>
+              </div>
+            )}
+
             <div style={{ background: '#0F172A', padding: '32px', borderRadius: '16px', border: '1px solid #1E293B', textAlign: 'center' }}>
-              
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
                 <div style={{ fontSize: '13px', color: '#94A3B8', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   Session Expiry: <strong style={{ color: countdown < 60 ? '#EF4444' : '#F59E0B' }}>{formatCountdown(countdown)}</strong>
                 </div>
-                <button 
+                <button
                   onClick={handleRefreshQR}
+                  aria-label="Refresh the QR code and generate a new session"
                   style={{ background: 'rgba(51, 65, 85, 0.5)', border: '1px solid #334155', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', color: '#94A3B8', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', transition: 'all 0.2s' }}
-                  title="Refresh Session & QR Code"
+                  title="Refresh Session &amp; QR Code"
                 >
                   <RefreshCw style={{ width: '14px', height: '14px' }} /> Refresh QR
                 </button>
@@ -392,13 +451,13 @@ export default function App() {
               <p style={{ color: '#94A3B8', fontSize: '14px', marginBottom: '28px', maxWidth: '440px', margin: '0 auto 28px auto' }}>
                 Open your verified mobile banking app and scan the QR code to sign the active session payload.
               </p>
-              
-              {/* Day 2: Dynamic QR Code Rendering using qrcode.react */}
+
+              {/* QR Code */}
               <div style={{ background: '#FFFFFF', padding: '24px', display: 'inline-block', borderRadius: '16px', marginBottom: '28px', boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)', border: '4px solid #38BDF8' }}>
                 <QRCodeSVG value={sessionId} size={220} level="H" includeMargin={false} />
               </div>
 
-              {/* WebSocket Status Indicator */}
+              {/* WebSocket Status */}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '28px', fontSize: '13px' }}>
                 {wsStatus === 'connected' ? (
                   <span style={{ color: '#10B981', display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(16, 185, 129, 0.1)', padding: '6px 14px', borderRadius: '20px', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
@@ -408,20 +467,25 @@ export default function App() {
                 ) : (
                   <span style={{ color: '#F59E0B', display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(245, 158, 11, 0.1)', padding: '6px 14px', borderRadius: '20px', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
                     <AlertCircle style={{ width: '14px', height: '14px' }} />
-                    {isStandalone ? 'Standalone mode active' : 'Connecting WebSocket...'}
+                    {wsStatus === 'connecting'
+                      ? 'Connecting to backend...'
+                      : isStandalone
+                      ? 'Standalone mode active'
+                      : 'WebSocket disconnected'}
                   </span>
                 )}
               </div>
 
-              {/* Day 3 Interactive Mobile Approval Trigger / Fallback Simulator */}
+              {/* Simulation Button (DEV / DEMO ONLY) */}
               <div style={{ marginBottom: '24px' }}>
-                <button 
+                <button
                   onClick={simulateMobileApproval}
                   disabled={loading}
+                  aria-label="Simulate a mobile biometric approval — for demo purposes only"
                   style={{ background: loading ? '#334155' : '#10B981', color: '#FFF', border: 'none', borderRadius: '10px', padding: '14px 28px', fontSize: '15px', fontWeight: '700', cursor: loading ? 'not-allowed' : 'pointer', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)', transition: 'all 0.2s' }}
                 >
-                  <Smartphone style={{ width: '20px', height: '20px' }} /> 
-                  {loading ? 'Verifying Titan M2 Signature...' : 'Simulate Mobile Biometric Approval'} 
+                  <Smartphone style={{ width: '20px', height: '20px' }} />
+                  {loading ? 'Verifying Titan M2 Signature...' : 'Simulate Mobile Biometric Approval'}
                 </button>
               </div>
 
@@ -432,10 +496,10 @@ export default function App() {
           </div>
         )}
 
-        {/* STAGE 3: LIVE UNLOCK & ACCOUNT DASHBOARD (Day 3 Transition & Dashboard) */}
+        {/* STAGE 3: ACCOUNT DASHBOARD */}
         {appStep === 3 && (
           <div className="animate-scale-up" style={{ maxWidth: '1000px', width: '100%', boxSizing: 'border-box' }}>
-            
+
             {/* Live Unlock Telemetry Banner */}
             <div style={{ background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(6, 78, 59, 0.3) 100%)', border: '1px solid rgba(16, 185, 129, 0.4)', padding: '24px 32px', borderRadius: '16px', marginBottom: '28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -445,7 +509,7 @@ export default function App() {
                 <div>
                   <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '700', color: '#10B981' }}>ACCESS GRANTED — Biometric Session Authenticated</h3>
                   <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#A7F3D0' }}>
-                    Titan M2 Signature Verified & Live Cardiac Telemetry Validated
+                    Titan M2 Signature Verified &amp; Live Cardiac Telemetry Validated
                   </p>
                 </div>
               </div>
@@ -453,7 +517,8 @@ export default function App() {
               {authData && (
                 <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
                   <div style={{ background: 'rgba(15, 23, 42, 0.7)', padding: '8px 16px', borderRadius: '10px', border: '1px solid rgba(16, 185, 129, 0.3)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Activity style={{ width: '18px', height: '18px', color: '#EF4444' }} />
+                    {/* Heartbeat animation on the BPM icon */}
+                    <Activity className="animate-heartbeat" style={{ width: '18px', height: '18px' }} />
                     <div>
                       <div style={{ fontSize: '11px', color: '#94A3B8' }}>Live BPM</div>
                       <div style={{ fontSize: '15px', fontWeight: '700', color: '#F8FAFC' }}>{authData.bpm} BPM</div>
@@ -473,7 +538,7 @@ export default function App() {
 
             {/* Account Dashboard Content Grid */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '24px', marginBottom: '28px' }}>
-              
+
               {/* Account Overview Card */}
               <div style={{ background: '#1E293B', padding: '28px', borderRadius: '16px', border: '1px solid #334155', boxShadow: '0 10px 25px rgba(0,0,0,0.4)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
@@ -487,11 +552,17 @@ export default function App() {
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                  <button style={{ background: '#0284C7', border: 'none', borderRadius: '8px', padding: '12px', color: '#FFF', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                  <button
+                    aria-label="Make a quick fund transfer"
+                    style={{ background: '#0284C7', border: 'none', borderRadius: '8px', padding: '12px', color: '#FFF', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', transition: 'all 0.2s' }}
+                  >
                     <Send style={{ width: '14px', height: '14px' }} /> Quick Transfer
                   </button>
-                  <button style={{ background: '#334155', border: 'none', borderRadius: '8px', padding: '12px', color: '#FFF', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                    <CreditCard style={{ width: '14px', height: '14px' }} /> Cards & UPI
+                  <button
+                    aria-label="Manage cards and UPI settings"
+                    style={{ background: '#334155', border: 'none', borderRadius: '8px', padding: '12px', color: '#FFF', fontSize: '13px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', transition: 'all 0.2s' }}
+                  >
+                    <CreditCard style={{ width: '14px', height: '14px' }} /> Cards &amp; UPI
                   </button>
                 </div>
               </div>
@@ -530,7 +601,12 @@ export default function App() {
                 <h4 style={{ margin: 0, fontSize: '16px', fontWeight: '700', color: '#F8FAFC', display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <History style={{ width: '18px', height: '18px', color: '#38BDF8' }} /> Recent Netbanking Transactions
                 </h4>
-                <span style={{ fontSize: '13px', color: '#38BDF8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="View all transactions"
+                  style={{ fontSize: '13px', color: '#38BDF8', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                >
                   View All <ChevronRight style={{ width: '14px', height: '14px' }} />
                 </span>
               </div>

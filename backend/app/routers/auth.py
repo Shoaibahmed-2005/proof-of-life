@@ -44,9 +44,10 @@ async def verify_biometric(request: VerifyRequest) -> VerifyResponse:
     1. ECDSA signature verification against the provided public key.
     2. Payload deserialization and schema validation.
     3. Session existence and status check (must be PENDING).
-    4. BPM biological plausibility check (40–220 BPM).
-    5. Timestamp freshness check (within session window).
-    6. On success: updates session → GRANTED and pushes ACCESS_GRANTED via WS.
+    4. Session marked as VERIFIED (payload accepted, liveness pending).
+    5. BPM biological plausibility check via liveness service.
+    6. Timestamp freshness check (within session window).
+    7. On success: updates session → GRANTED and pushes ACCESS_GRANTED via WS.
     """
     session_id = "unknown"
 
@@ -115,7 +116,14 @@ async def verify_biometric(request: VerifyRequest) -> VerifyResponse:
                 reason="Session has expired",
             )
 
-        # ── Step 4: Validate Liveness & Anti-Spoofing Parameters ──────────
+        # ── Step 4: Mark session as VERIFIED before liveness checks ────
+        # This reflects the true lifecycle: PENDING → VERIFIED → GRANTED.
+        session_manager.update_status(
+            session_id=session_id,
+            status=SessionStatus.VERIFIED,
+        )
+
+        # ── Step 5: Validate Liveness & Anti-Spoofing Parameters ──────────
         try:
             validate_liveness(
                 bpm=payload.bpm,

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,15 +20,15 @@ class SpoofingDetectedError(Exception):
 def validate_liveness(bpm: int, snr: float | None = None, variance: float | None = None) -> bool:
     """
     Validates biometric parameters to ensure the signal is from a live human.
-    
+
     Args:
         bpm: Beats per minute extracted via the POS algorithm.
         snr: Signal-to-Noise Ratio of the rPPG signal.
         variance: The statistical variance of the BPM over the measurement window.
-        
+
     Returns:
         True if the data passes all liveness checks.
-        
+
     Raises:
         SpoofingDetectedError: If any metric fails threshold checks.
     """
@@ -34,10 +36,18 @@ def validate_liveness(bpm: int, snr: float | None = None, variance: float | None
     effective_snr = 5.0 if snr is None else snr
     effective_variance = 2.5 if variance is None else variance
 
-    # 1. Absolute Biological Limits
-    if not (50 <= bpm <= 120):
-        logger.warning("Liveness failure: BPM %d out of human range [50, 120].", bpm)
-        raise SpoofingDetectedError(f"BPM {bpm} is outside acceptable biological limits (50-120 BPM).")
+    bpm_min = settings.BPM_MIN
+    bpm_max = settings.BPM_MAX
+
+    # 1. Absolute Biological Limits (driven from settings to stay in sync with config)
+    if not (bpm_min <= bpm <= bpm_max):
+        logger.warning(
+            "Liveness failure: BPM %d out of human range [%d, %d].",
+            bpm, bpm_min, bpm_max,
+        )
+        raise SpoofingDetectedError(
+            f"BPM {bpm} is outside acceptable biological limits ({bpm_min}-{bpm_max} BPM)."
+        )
         
     # 2. Signal Quality (SNR) Threshold
     # A low SNR indicates random noise or a flat video (e.g., holding a picture to the camera)
