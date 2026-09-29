@@ -60,9 +60,9 @@ Full instructions: `ANDROID_BUILD.md`, section "Wi-Fi setup". In short:
 - Without a stable pulse within 30 s, the app reports "No pulse detected".
 - The backend address comes from the QR code.
 
-The laptop portal is still the old banking demo in this milestone (the new portal is M7), but it now shows the phone's live progress and rejections.
+The laptop portal is the new Jeevan Suraksha portal (Milestone 7). It shows the phone's live progress and results.
 
-**Before the first scan:** open the portal, click **Initialize**, and scan the QR code on screen.
+**Before the first scan:** open the portal (`http://<laptop-ip>:5173`), go to **Help & FAQs → Practice scan** (or `/practice`), tick the consent box, click **Start practice scan**, and scan the QR code on screen.
 
 | # | Test | Steps | Expected result |
 |---|---|---|---|

@@ -1,0 +1,101 @@
+/*
+ * Jeevan Suraksha design tokens (DESIGN.md §1). Every colour, radius, shadow
+ * and font used anywhere in the portal comes from here.
+ */
+:root {
+  /* Colours */
+  --primary: #E8603C;
+  --primary-dark: #C94A28;   /* hover, and orange text on white (4.6:1) */
+  --primary-soft: #FBD9C7;
+  --peach-bg: #FFF1E8;
+  --accent-green: #1E7B5E;
+  --accent-green-bg: #E6F4EE;
+  --warning: #B7791F;
+  --warning-bg: #FFF4DE;
+  --warning-text: #8A5A12;   /* darker amber for small text on --warning-bg (AA) */
+  --danger: #B42318;
+  --danger-bg: #FDECEC;
+  --neutral: #5B6573;
+  --neutral-bg: #EEF0F3;
+  --text: #1F2933;
+  --text-muted: #5B6573;
+  --surface: #FFFFFF;
+  --border: #EADFD7;
+  --charcoal: #26282B;
+  --charcoal-2: #1B1C1E;
+  --on-dark: #F4F1EE;
+  --on-dark-muted: #C9C4BF;
+
+  /* Shape and depth */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+  --shadow-lift: 0 12px 28px rgba(0, 0, 0, 0.10);
+  --focus-ring: 0 0 0 3px #FFFFFF, 0 0 0 6px var(--primary-dark);
+
+  /* Type */
+  --font-heading: "Poppins", "Montserrat", system-ui, sans-serif;
+  --font-body: "Noto Sans", "Inter", system-ui, sans-serif;
+  --font-hindi: "Noto Sans Devanagari", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* Layout */
+  --content-max: 1200px;
+  --gutter: 24px;
+  --control-height: 48px;
+}
+
+/* Text-size control (A− / A / A+) scales every rem-based size. */
+html { font-size: 100%; }
+html[data-text-size="small"] { font-size: 93.75%; }
+html[data-text-size="large"] { font-size: 118.75%; }
+html[lang="hi"] body { font-family: var(--font-hindi); }
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;             /* 16px minimum */
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 0.5em;
+  color: var(--text);
+}
+h1 { font-size: 2.25rem; }
+h2 { font-size: 1.75rem; }
+h3 { font-size: 1.25rem; }
+p { margin: 0 0 1em; }
+a { color: var(--primary-dark); }
+a:hover { color: var(--primary); }
+img, svg { max-width: 100%; }
+
+/* Visible focus for keyboard users, everywhere. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+
+.mono { font-family: var(--font-mono); font-size: 0.9em; word-break: break-all; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

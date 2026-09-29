@@ -7,7 +7,7 @@
 **Current plan (tick = committed and pushed):**
 - [x] **1. Wi-Fi fix.** `backend/run.py` (0.0.0.0), adapter-aware QR address (`app/core/network.py`), startup banner + LAN self-check, LAN CORS, `vite --host`, a network security config, app error reasons, and Wi-Fi setup docs.
 - [x] **2. Scan-speed diagnostics.** On-screen diagnostics toggle (off by default), `SentinelDiag` logcat, per-scan summary stored by the backend, 30 fps request, AE/AWB lock, poor-conditions guidance, a scan-speed comparison test. Also: gate parameters come from the backend `.env` via the QR code, and face-loss tolerance is relaxed (it was 1 s, a likely cause of scans never finishing).
-- [ ] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
+- [x] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
 - [ ] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
 - [ ] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
 - [ ] **6. M8:** docs, `DEMO_SCRIPT.md`, end-to-end run with the simulator, and one combined `TESTING_CHECKLIST.md`.
@@ -504,3 +504,38 @@ Each milestone ends with: a build (or a teammate build if D1 is declined), an en
 - ledger endpoints and tamper detection;
 - treasury counts and amounts through freeze and restore;
 - the migration.
+
+### Step 1 (Wi-Fi) and Step 2 (diagnostics), 2026-09-30
+See commits `82bfbd2` and `084af5b`, plus the "Wi-Fi setup" and "Scan speed comparison" sections of `TESTING_CHECKLIST.md`.
+- **New backend files:** `run.py` (always 0.0.0.0), `app/core/network.py` (adapter-aware QR address, startup banner, LAN self-check), `routers/diagnostics.py`.
+- **Changed backend:**
+  - the `scan_diagnostics` table;
+  - the QR `liveness` block carries every gate setting;
+  - CORS allows LAN origins;
+  - `calibrate_thresholds.py scans` / `label-scans`.
+- **App:**
+  - `camera/CameraTuning.kt` (30 fps range, AE/AWB lock) and `rppg/ScanDiagnostics.kt`;
+  - `GateSettings` from the QR;
+  - diagnostics toggle, guidance prompts, and error reasons in `ApiClient`;
+  - `res/xml/network_security_config.xml`;
+  - the JNI header grows to 18 values.
+
+### M7: Web portal (2026-09-30)
+The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). React 18 + Vite 5 + react-router-dom 6.30, with no UI kit. Everything follows `DESIGN.md`.
+
+**Structure:**
+- `src/theme/`: `tokens.css` (all tokens) and `components.css` (shell + component library).
+- `src/app/`: `providers.jsx` (auth, toasts + ARIA live region, i18n, text size), `strings.js` (English + Hindi), `useScanFlow.js` (WebSocket events to the stepper, with a polling fallback).
+- `src/api/`: `client.js` (backend on the same host, port 8000) and `sockets.js`.
+- `src/components/`: `Shell` (utility bar, header, nav, officer nav, banner, footer), `ui` (badge, stepper, QR panel, certificate card, table, field, hash), `sections` (hero, highlight, side info, features, showcase, feeds, icon carousel, links, FAQ), `Art` (original SVGs), `Consent`, `ScanPanel`, `RequireOfficer`.
+- `src/pages/`: Home, SubmitCertificate, PracticeScan (AUTH, a device check), CheckStatus, OfficerLogin, OfficerHome (live events), RegisterPensioner, ReviewQueue (borderline + frozen), Records/RecordDetail, Treasury, Ledger (chain verify + credential verifier), and Info (How It Works, Help, Contact, Search, Not found).
+
+**Verified in the browser:**
+- the full submit flow (simulator scan: stepper, then certificate card, then ledger verify);
+- the officer flows: login redirect, review approve (with the empty-reason guard), restore frozen, and registration with capture, approve, Active + DID;
+- the treasury figures;
+- no horizontal overflow at 375 px on 15 pages;
+- WCAG contrast of every colour pair;
+- the Hindi toggle, the text-size control and the skip link.
+
+**Security detail:** the portal never shows the challenge before the scan, so an attacker can't pick a matching video in advance.
