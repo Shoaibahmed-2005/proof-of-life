@@ -85,3 +85,24 @@ def test_seed_demo(client, officer_headers):
     with Session(get_engine()) as d:
         assert ledger.verify_chain(d).valid
     assert seed_demo.seed() == 0  # second run is a no-op
+
+
+def test_reset_demo_moves_data_and_starts_clean(client, officer_headers, capsys):
+    from app.core.config import settings
+    from app.db import database
+    from scripts import reset_demo
+    from tests.conftest import create_pensioner
+
+    create_pensioner(client, officer_headers)
+    assert reset_demo.reset(confirm=False, seed=False) == 0          # dry run changes nothing
+    assert len(client.get("/api/v1/pensioners", headers=officer_headers).json()) == 1
+
+    database.get_engine().dispose()   # release the SQLite file (Windows locks it)
+    database.set_engine(None)
+    assert reset_demo.reset(confirm=True, seed=False) == 0
+    backups = list((settings.DATA_DIR / "backups").iterdir())
+    assert len(backups) == 1 and (backups[0] / "iob.db").exists()     # moved, not deleted
+    assert client.get("/api/v1/pensioners", headers=officer_headers).json() == []
+    # the demo officer still logs in on the fresh database
+    assert client.post("/api/v1/officers/login", json={"username": "officer",
+                                                        "password": "officer123"}).status_code == 200

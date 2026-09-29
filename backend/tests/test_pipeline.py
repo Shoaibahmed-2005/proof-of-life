@@ -386,3 +386,41 @@ def test_session_expiry(client):
               "device_id": "d", "snr": 5, "variance": 2}
     r = Phone(client).submit(legacy)
     assert r.json()["status"] == "ACCESS_DENIED"
+
+
+def test_demo_finale_freeze_then_officer_restores_from_queue(client, officer_headers):
+    """Demo S3-S5 freeze A; the officer restores A from the review queue; A certifies again."""
+    phone = Phone(client)
+    p = register(client, officer_headers, phone, TEMPLATE)
+    attacks = [dict(face_embedding=random_unit(77)),                       # S3 face mismatch
+               dict(liveness_passed=False),                                # S4 photo
+               dict(challenge_passed=False)]                               # S5 video
+    for attack in attacks:
+        s = lc(client)
+        fields = {"face_embedding": with_cosine(TEMPLATE, 0.95, 8), **attack}
+        assert phone.submit(phone.payload_for(s["qr_payload"], **fields)).json()["outcome"] == "REJECTED"
+
+    frozen = client.get("/api/v1/reviews/frozen", headers=officer_headers).json()
+    assert [f["pensioner"]["id"] for f in frozen] == [p["id"]]
+    assert len(frozen[0]["recent_certificates"]) == 3
+    assert client.get("/api/v1/reviews/frozen").status_code == 401
+
+    token = officer_headers["Authorization"].split()[1]
+    with client.websocket_connect(f"/api/v1/ws/events?token={token}") as ws:
+        ws.receive_json()
+        r = client.post(f"/api/v1/reviews/frozen/{p['id']}/restore", headers=officer_headers,
+                        json={"reason": "Met pensioner in person; attempts were a demo"})
+        assert r.status_code == 200 and r.json()["status"] == "ACTIVE" and r.json()["failed_attempts"] == 0
+        ev = ws.receive_json()
+        assert ev["event"] == "STATUS_CHANGED" and ev["pension_status"] == "ACTIVE"
+    assert client.get("/api/v1/reviews/frozen", headers=officer_headers).json() == []
+    assert client.post(f"/api/v1/reviews/frozen/{p['id']}/restore", headers=officer_headers,
+                       json={"reason": "again"}).status_code == 409
+
+    s = lc(client)
+    r = phone.submit(phone.payload_for(s["qr_payload"], face_embedding=with_cosine(TEMPLATE, 0.95, 9)))
+    assert r.json()["outcome"] == "ISSUED"
+    with db() as d:
+        events = [e.event_type for e in d.exec(select(LedgerEntry).order_by(LedgerEntry.id)).all()]
+        assert events.count("STATUS_CHANGED") == 2  # frozen, then restored
+        assert ledger.verify_chain(d).valid

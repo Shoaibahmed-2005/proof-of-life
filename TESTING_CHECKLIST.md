@@ -106,7 +106,9 @@ Team member **A** is the registered pensioner. Team member **B** is someone else
 
 After S1–S5, the **Audit Ledger → Verify chain integrity** button shows green. The Treasury page shows 1 certificate issued and 3 rejections split by reason.
 
-**A's pension is frozen after S5.** With `MAX_FAILED_ATTEMPTS=3` (backend `.env`), the three failed attempts in S3–S5 freeze it, and the portal shows **Frozen**. An officer restores it through the Review Queue. To rehearse again, register a new pensioner, or raise `MAX_FAILED_ATTEMPTS` in `backend/.env` and restart the backend.
+**A's pension is frozen after S5.** With `MAX_FAILED_ATTEMPTS=3` (backend `.env`), the three failed attempts in S3–S5 freeze it, and the portal shows **Frozen**. This is the finale: "three attacks, and the pension is frozen until an officer reviews it". The officer then opens **Review Queue → Frozen pensions → Restore** and gives a reason, and A is Active again.
+
+**Rehearsing from a clean state:** stop the backend, then run `python scripts/reset_demo.py --yes --seed` in `backend/`, and start it again. The old data is moved to `backend/data/backups/`, not deleted.
 
 **Rehearsing without the phone:** `backend/scripts/simulate_phone.py` runs all five outcomes against the backend and portal, using a software key that shows as SOFTWARE (see `backend/README.md`).
 

@@ -27,7 +27,7 @@ def get_by_ppo(db: Session, ppo_number: str) -> Pensioner | None:
 
 
 def set_status(db: Session, pensioner: Pensioner, status: PensionerStatus,
-               reason: str | None, reason_code: str) -> None:
+               reason: str | None, reason_code: str, officer_id: int | None = None) -> None:
     """Changes status, writes a ledger entry and commits."""
     if pensioner.status is status:
         return
@@ -35,10 +35,11 @@ def set_status(db: Session, pensioner: Pensioner, status: PensionerStatus,
     pensioner.status = status
     pensioner.status_reason = reason
     db.add(pensioner)
-    ledger.append(db, LedgerEvent.STATUS_CHANGED, {
-        "pensioner_id": pensioner.id, "from": old.value, "to": status.value,
-        "reason_code": reason_code, "at": utcnow().isoformat(),
-    }, ref=f"pensioner:{pensioner.id}")
+    data = {"pensioner_id": pensioner.id, "from": old.value, "to": status.value,
+            "reason_code": reason_code, "at": utcnow().isoformat()}
+    if officer_id is not None:
+        data["officer_id"] = officer_id
+    ledger.append(db, LedgerEvent.STATUS_CHANGED, data, ref=f"pensioner:{pensioner.id}")
     logger.info("Pensioner %s status %s → %s (%s)", pensioner.id, old.value, status.value, reason_code)
 
 
@@ -61,6 +62,15 @@ def record_success(db: Session, pensioner: Pensioner) -> None:
         set_status(db, pensioner, PensionerStatus.ACTIVE, None, "CERTIFICATE_APPROVED")
     else:
         db.commit()
+
+
+def restore(db: Session, pensioner: Pensioner, officer_id: int, reason: str) -> None:
+    """Officer lifts a freeze after resolving it (e.g. verified the pensioner in person)."""
+    pensioner.failed_attempts = 0
+    set_status(db, pensioner, PensionerStatus.ACTIVE, None, "OFFICER_RESTORED", officer_id=officer_id)
+    pensioner.status_reason = f"Restored by officer: {reason}"
+    db.add(pensioner)
+    db.commit()
 
 
 def deadline_for_year(year: int) -> date:

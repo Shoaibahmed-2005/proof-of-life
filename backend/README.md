@@ -47,7 +47,8 @@ backend/
 ├── scripts/
 │   ├── calibrate_thresholds.py    # Label genuine/impostor scores → suggest thresholds
 │   ├── simulate_phone.py          # Dev tool: acts as the phone (software key)
-│   └── seed_demo.py               # Fictional demo pensioners
+│   ├── seed_demo.py               # Fictional demo pensioners
+│   └── reset_demo.py              # Clean state for rehearsals (backs up, never deletes)
 ├── tests/                         # pytest suite (pipeline, face match, scripts)
 ├── data/                          # (gitignored) SQLite DB, dev keys, score log
 ├── .env.example  requirements.txt  requirements-dev.txt
@@ -74,6 +75,8 @@ All paths are under `/api/v1`. 🔒 = officer token required (`Authorization: Be
 | `POST` | `/enroll/complete` 🔒 | Approve a captured registration → `ACTIVE` |
 | `GET` | `/reviews` 🔒 | Certificates under review |
 | `POST` | `/reviews/{certificate_id}/decision` 🔒 | `{decision: APPROVE\|REJECT, reason}` |
+| `GET` | `/reviews/frozen` 🔒 | Frozen pensions with their recent attempts |
+| `POST` | `/reviews/frozen/{pensioner_id}/restore` 🔒 | `{reason}`: lift a freeze after resolving the case |
 | `WS` | `/ws/{session_id}` | Portal: live events for one session |
 | `WS` | `/ws/events?token=` 🔒 | Officer dashboards: all events |
 | `WS` | `/ws/telemetry/{session_id}?nonce=` | Phone → portal scan progress (relayed) |
@@ -134,6 +137,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 - Swagger UI: http://localhost:8000/docs
 - Demo officer: `officer` / `officer123` (set in `.env`)
 - Optional fictional demo data: `python scripts/seed_demo.py`
+- Rehearse from a clean state: stop the backend, then `python scripts/reset_demo.py --yes` (add `--seed` for the demo pensioners). The old database is moved to `data/backups/`.
 
 `--host 0.0.0.0` lets a phone on the same Wi-Fi reach the laptop. The QR code carries the laptop's LAN IP automatically, or `PUBLIC_BASE_URL` if set (e.g. a `cloudflared` tunnel URL). Over USB, `adb reverse tcp:8000 tcp:8000` also works.
 

@@ -1,4 +1,8 @@
-"""Officer review queue for borderline life certificates (build-prompt §3.2, §5.3)."""
+"""
+Officer review queue (build-prompt §3.2, §5.3):
+- borderline life certificates (approve / reject with a reason), and
+- frozen pensions (restore once the officer has resolved the case).
+"""
 
 from __future__ import annotations
 
@@ -6,9 +10,12 @@ from fastapi import APIRouter, HTTPException, status
 from sqlmodel import select
 
 from app.core.deps import CurrentOfficer, DbSession
-from app.db.models import CertificateStatus, LifeCertificate, Pensioner
+from app.db.models import CertificateStatus, LifeCertificate, Pensioner, PensionerStatus
 from app.db.types import utcnow
-from app.schemas.pensioner import CertificateOut, ReviewDecision, ReviewDecisionResponse, ReviewItem
+from app.schemas.pensioner import (
+    CertificateOut, FrozenItem, PensionerOut, RestoreRequest, ReviewDecision,
+    ReviewDecisionResponse, ReviewItem,
+)
 from app.services import pensioners as pensioner_service
 from app.services.connection_manager import manager
 from app.services.ledger import LedgerEvent, ledger
@@ -27,6 +34,37 @@ def list_reviews(db: DbSession, officer: CurrentOfficer) -> list[ReviewItem]:
                    pensioner_name=p.name, ppo_number=p.ppo_number, pensioner_status=p.status)
         for cert, p in db.exec(stmt).all()
     ]
+
+
+@router.get("/frozen", response_model=list[FrozenItem], summary="Frozen pensions (officer)")
+def list_frozen(db: DbSession, officer: CurrentOfficer) -> list[FrozenItem]:
+    items = []
+    for p in db.exec(select(Pensioner).where(Pensioner.status == PensionerStatus.FROZEN)
+                     .order_by(Pensioner.name)).all():
+        certs = db.exec(select(LifeCertificate).where(LifeCertificate.pensioner_id == p.id)
+                        .order_by(LifeCertificate.created_at.desc()).limit(5)).all()
+        items.append(FrozenItem(pensioner=PensionerOut.model_validate(p),
+                                recent_certificates=[CertificateOut.model_validate(c) for c in certs]))
+    return items
+
+
+@router.post("/frozen/{pensioner_id}/restore", response_model=PensionerOut,
+             summary="Lift a freeze after resolving the case (officer)")
+async def restore_frozen(pensioner_id: int, body: RestoreRequest, db: DbSession,
+                         officer: CurrentOfficer) -> PensionerOut:
+    pensioner = db.get(Pensioner, pensioner_id)
+    if pensioner is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pensioner not found")
+    if pensioner.status is not PensionerStatus.FROZEN:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Pension is {pensioner.status.value}, not frozen")
+    pensioner_service.restore(db, pensioner, officer.id, body.reason.strip())
+    db.refresh(pensioner)
+    await manager.publish(None, {
+        "event": "STATUS_CHANGED", "pensioner_id": pensioner.id,
+        "pension_status": pensioner.status.value, "reason_code": "OFFICER_RESTORED",
+        "at": utcnow().isoformat(),
+    })
+    return PensionerOut.model_validate(pensioner)
 
 
 @router.post("/{certificate_id}/decision", response_model=ReviewDecisionResponse,

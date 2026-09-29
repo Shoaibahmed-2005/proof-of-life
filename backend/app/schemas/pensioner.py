@@ -147,3 +147,13 @@ class ReviewDecision(BaseModel):
 class ReviewDecisionResponse(BaseModel):
     certificate: CertificateOut
     pensioner_status: PensionerStatus
+
+
+class FrozenItem(BaseModel):
+    """A frozen pension waiting for an officer to resolve it."""
+    pensioner: PensionerOut
+    recent_certificates: list[CertificateOut] = []
+
+
+class RestoreRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
