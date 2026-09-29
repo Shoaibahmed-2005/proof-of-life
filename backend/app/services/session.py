@@ -19,13 +19,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-import socket
 from datetime import timedelta
 from urllib.parse import urlsplit
 
 from sqlalchemy import update
 from sqlmodel import Session, select
 
+from app.core import network
 from app.core.config import settings
 from app.db.database import get_engine
 from app.db.models import AuthSession, SessionPurpose, SessionStatus
@@ -41,17 +41,6 @@ TERMINAL_STATUSES = {SessionStatus.GRANTED, SessionStatus.COMPLETED,
 
 # ── Base URL for the QR code ────────────────────────────────────────────
 
-def _lan_ip() -> str | None:
-    """This machine's LAN IP (no packets are sent; UDP connect only picks a route)."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("10.255.255.255", 1))
-            ip = s.getsockname()[0]
-            return None if ip.startswith("127.") else ip
-    except OSError:
-        return None
-
-
 def resolve_base_url(request_base_url: str) -> str:
     """
     PUBLIC_BASE_URL if configured; otherwise the URL the portal used to reach
@@ -63,7 +52,7 @@ def resolve_base_url(request_base_url: str) -> str:
     parts = urlsplit(request_base_url)
     host, port = parts.hostname or "localhost", parts.port
     if host in ("localhost", "127.0.0.1", "::1"):
-        host = _lan_ip() or host
+        host = network.lan_ip() or host
     netloc = f"{host}:{port}" if port else host
     return f"{parts.scheme or 'http'}://{netloc}"
 

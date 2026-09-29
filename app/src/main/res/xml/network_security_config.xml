@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The backend runs on a laptop on the local network and is reached over plain
+  HTTP (http://192.168.x.x:8000, or http://localhost:8000 with adb reverse).
+  Android 9+ blocks cleartext HTTP unless it is allowed here. Local IP
+  addresses can't be listed as domains, so cleartext is allowed in general;
+  HTTPS (e.g. a cloudflared tunnel) keeps working as normal.
+  The payload itself is signed inside Titan M2, so it can't be altered in transit.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

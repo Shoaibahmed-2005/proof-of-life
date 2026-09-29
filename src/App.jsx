@@ -23,7 +23,7 @@ import {
 import { QRCodeSVG } from 'qrcode.react';
 
 // Backend address: set VITE_API_BASE in .env.local to override (e.g. http://192.168.1.20:8000/api/v1).
-const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
 const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws') + '/ws';
 
 // Number of WebSocket reconnect attempts before giving up.
@@ -452,6 +452,7 @@ export default function App() {
               </div>
 
               <div style={{ fontSize: '12px', color: '#64748B', wordBreak: 'break-all', borderTop: '1px solid #1E293B', paddingTop: '16px' }}>
+                Phone connects to: <strong style={{ color: '#F8FAFC' }}>{qrPayload?.base_url || 'n/a'}</strong><br />
                 Active Session Token: <span style={{ color: '#38BDF8', fontFamily: 'monospace', fontWeight: '600' }}>{sessionId}</span>
               </div>
             </div>

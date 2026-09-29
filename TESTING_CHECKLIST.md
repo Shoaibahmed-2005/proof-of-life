@@ -19,7 +19,7 @@ Each milestone's section is updated when that milestone is delivered. Thresholds
    ```powershell
    cd backend
    .\venv\Scripts\Activate.ps1
-   uvicorn app.main:app --host 0.0.0.0 --port 8000
+   python run.py
    ```
 5. **Connect the phone to the backend** using one of these:
    - USB (easiest): `adb reverse tcp:8000 tcp:8000`. The phone then reaches the laptop at `localhost:8000`.
@@ -28,6 +28,25 @@ Each milestone's section is updated when that milestone is delivered. Thresholds
 7. **Start a log capture** before testing (section 7.2) so failures are already recorded.
 
 Test conditions: indoor, even light on the face (no strong window light behind you), phone held about 30–40 cm from the face, stable if possible (resting on a table is best).
+
+---
+
+## W. Wi-Fi setup (do this before any other test)
+
+Full instructions: `ANDROID_BUILD.md`, section "Wi-Fi setup". In short:
+1. Start the backend with `python run.py` (**not** plain `uvicorn`) and the portal with `npm run dev`.
+2. Set the laptop's Wi-Fi to *Private* and add the two firewall rules (ports 8000 and 5173).
+3. Check the address the portal's QR page shows.
+
+| # | Test | Steps | Expected result |
+|---|---|---|---|
+| W.1 | Backend banner | Start the backend. | It prints "QR codes use http://<laptop Wi-Fi IP>:8000" and, a second later, `LAN self-check OK`. Note any "network adapters found" warning and the list it prints. |
+| W.2 | Phone browser | On a phone that has **never** used USB/adb, open `http://<laptop-ip>:8000/api/v1/health` in Chrome. | `{"status":"ok",…}`. If it times out: firewall or Wi-Fi isolation (ANDROID_BUILD.md steps 3 and 5). |
+| W.3 | Portal from another device | On a second device, open `http://<laptop-ip>:5173`. | The portal loads, and creating a QR code works (no "cannot reach the server" message). |
+| W.4 | App over Wi-Fi | **Unplug USB** (no `adb reverse`). Scan a QR code. | The camera opens (no "Can't reach the laptop"). |
+| W.5 | Error is explained | Stop the backend, then scan a QR code. | "Can't reach the laptop", listing each address tried with a reason (e.g. "connection refused…"). Send a photo of this screen if W.4 failed. |
+| W.6 | Second phone | Repeat W.2 and W.4 with another phone (e.g. your father's) on the same Wi-Fi. | Same results as the first phone. |
+| W.7 | Hotspot fallback (only if W.2 fails on the venue Wi-Fi) | Connect the laptop and phones to one phone's hotspot, restart the backend, and repeat W.1–W.4. | Works over the hotspot. |
 
 ---
 

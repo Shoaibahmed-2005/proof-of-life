@@ -220,11 +220,12 @@ class MainActivity : AppCompatActivity() {
         }
         scanState.value = ScanState.Connecting(qr)
         lifecycleScope.launch {
-            val baseUrl = ApiClient.resolveReachableBaseUrl(qr.baseUrl)
+            val probe = ApiClient.resolveReachableBaseUrl(qr.baseUrl)
+            val baseUrl = probe.baseUrl
             if (baseUrl == null) {
-                scanState.value = ScanState.Result(false, "Can't reach the portal",
-                    "Tried ${qr.baseUrl ?: "no address in QR"} and localhost. Make sure the phone and laptop " +
-                        "are on the same Wi-Fi, or connect by USB and run: adb reverse tcp:8000 tcp:8000")
+                scanState.value = ScanState.Result(false, "Can't reach the laptop",
+                    probe.describeFailure() + "\n\nPhone and laptop must be on the same Wi-Fi, with port 8000 " +
+                        "allowed in Windows Firewall. Over USB: adb reverse tcp:8000 tcp:8000")
             } else {
                 startMeasuring(qr, baseUrl)
             }

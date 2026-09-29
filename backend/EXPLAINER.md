@@ -155,7 +155,7 @@ cd d:/IOB/backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+python run.py   # listens on 0.0.0.0:8000; plain `uvicorn app.main:app` would be localhost-only
 ```
 
 ### Step 2: Open Interactive API Docs

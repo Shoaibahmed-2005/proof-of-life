@@ -130,7 +130,7 @@ cd backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python run.py        # listens on 0.0.0.0:8000 (reachable from phones on the Wi-Fi)
 
 # Portal (in a second terminal, from the repo root)
 npm install

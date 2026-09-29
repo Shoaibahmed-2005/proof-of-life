@@ -147,7 +147,7 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1          # macOS/Linux: source venv/bin/activate
 pip install -r requirements-dev.txt
 copy .env.example .env               # then edit as needed
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python run.py                        # add --reload while developing
 ```
 
 - Swagger UI: http://localhost:8000/docs

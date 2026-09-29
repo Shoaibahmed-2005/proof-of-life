@@ -23,6 +23,10 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:5173",
     ]
+    # Also allow the portal when opened from another device on the local network.
+    CORS_ALLOW_LAN: bool = True
+    # At startup, check that the backend answers on its own LAN address.
+    LAN_SELF_CHECK: bool = True
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

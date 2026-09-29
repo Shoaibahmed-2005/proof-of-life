@@ -5,17 +5,20 @@ Pension life-certificate system on the IoB liveness engine: sessions and QR
 payloads, verification of Titan M2-signed biometric payloads, pensioner
 records, the officer review queue, the audit ledger and WebSocket push.
 
-Run:  uvicorn app.main:app --host 0.0.0.0 --port 8000
+Run:  python run.py          (listens on 0.0.0.0:8000 so phones on the Wi-Fi can connect)
 """
 
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
+import urllib.request
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
+from app.core import network
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.database import get_engine, init_db
@@ -30,6 +33,33 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _lan_self_check(port: int) -> None:
+    """Warns if the backend can't be reached on its own LAN address (e.g. bound to 127.0.0.1)."""
+    if settings.PUBLIC_BASE_URL:
+        return
+    ip = network.lan_ip()
+    if not ip:
+        return
+    url = f"http://{ip}:{port}{settings.API_V1_STR}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            ok = r.status == 200
+    except Exception as e:  # noqa: BLE001 - any failure means phones can't connect either
+        ok = False
+        logger.warning("LAN self-check failed for %s: %s", url, e)
+    if ok:
+        logger.info("LAN self-check OK: phones on this Wi-Fi can use http://%s:%d", ip, port)
+    else:
+        logger.warning(
+            "!! Phones on the Wi-Fi will NOT reach this backend at http://%s:%d. "
+            "Start it with `python run.py` (listens on 0.0.0.0), not plain `uvicorn app.main:app`.", ip, port)
+
+
+async def _delayed_self_check(port: int) -> None:
+    await asyncio.sleep(1.5)  # let the server start accepting connections
+    await asyncio.to_thread(_lan_self_check, port)
 
 
 def seed_demo_officer() -> None:
@@ -60,9 +90,14 @@ async def lifespan(app: FastAPI):
         pensioners.apply_deadline_freeze(db)
     maintenance = asyncio.create_task(sessions.maintenance_loop(interval_seconds=60))
     logger.info("Database ready at %s", settings.database_url)
+    port = int(os.environ.get("JS_BIND_PORT", "8000"))
+    print(network.startup_report(port, settings.PUBLIC_BASE_URL), flush=True)
+    self_check = asyncio.create_task(_delayed_self_check(port)) if settings.LAN_SELF_CHECK else None
     yield
     # ── Shutdown ────────────────────────────────────────────────────────
     maintenance.cancel()
+    if self_check:
+        self_check.cancel()
     logger.info("Shutdown complete")
 
 
@@ -77,10 +112,15 @@ app = FastAPI(
 )
 
 # Configure CORS middleware
-if settings.BACKEND_CORS_ORIGINS:
+# The portal may be opened from other devices on the Wi-Fi (http://<laptop-ip>:5173),
+# so private-network origins are allowed as well as the configured list.
+LAN_ORIGIN_REGEX = (r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+"
+                    r"|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$")
+if settings.BACKEND_CORS_ORIGINS or settings.CORS_ALLOW_LAN:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(origin).strip("/") for origin in settings.BACKEND_CORS_ORIGINS],
+        allow_origin_regex=LAN_ORIGIN_REGEX if settings.CORS_ALLOW_LAN else None,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -33,6 +33,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATABASE_URL", "")
     monkeypatch.setattr(settings, "TEMPLATE_KEY", "")
     monkeypatch.setattr(settings, "ISSUER_KEY_PEM", "")
+    monkeypatch.setattr(settings, "LAN_SELF_CHECK", False)
     monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "http://192.0.2.10:8000")
     # Fixed thresholds for the tests (real values come from calibration).
     monkeypatch.setattr(settings, "FACE_T_HIGH", 0.70)
