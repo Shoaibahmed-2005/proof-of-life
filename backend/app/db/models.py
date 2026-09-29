@@ -137,7 +137,8 @@ class LifeCertificate(SQLModel, table=True):
     reason: Optional[str] = None
     reviewed_by: Optional[int] = Field(default=None, foreign_key="officers.id")
     reviewed_at: Optional[datetime] = Field(default=None, sa_column=_ts(nullable=True))
-    credential_hash: Optional[str] = None  # hash of the verifiable credential (Milestone 6)
+    credential_hash: Optional[str] = None  # SHA-256 of the signed verifiable credential
+    credential_json: Optional[str] = None  # the signed credential (no personal data: subject is a DID)
     ledger_hash: Optional[str] = None      # ledger entry that recorded the issuance
     created_at: datetime = Field(default_factory=utcnow, sa_column=_ts())
 

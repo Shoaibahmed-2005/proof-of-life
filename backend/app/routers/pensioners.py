@@ -15,6 +15,7 @@ from app.schemas.pensioner import (
     CertificateOut, DeviceOut, PensionerCreate, PensionerDetail, PensionerOut, PensionerPublic,
 )
 from app.services import pensioners as pensioner_service
+from app.services.entitlement import entitlement_state
 
 router = APIRouter()
 
@@ -33,6 +34,10 @@ def status_this_year(certs: list[LifeCertificate]) -> CertificateStatus | None:
         if s in statuses:
             return s
     return None
+
+
+def entitlement_of(pensioner: Pensioner, certs: list[LifeCertificate]) -> str:
+    return entitlement_state(pensioner, status_this_year(certs) is CertificateStatus.ISSUED).value
 
 
 @router.post("", response_model=PensionerOut, status_code=status.HTTP_201_CREATED,
@@ -73,8 +78,9 @@ def lookup(db: DbSession, ppo_number: str = Query(min_length=4)) -> PensionerPub
     certs = certificates_for(db, pensioner.id)
     return PensionerPublic(
         id=pensioner.id, name=pensioner.name, ppo_number=pensioner.ppo_number,
-        status=pensioner.status, status_reason=pensioner.status_reason,
+        status=pensioner.status, status_reason=pensioner.status_reason, did=pensioner.did,
         certificate_this_year=status_this_year(certs),
+        entitlement=entitlement_of(pensioner, certs),
         certificates=[CertificateOut.model_validate(c) for c in certs],
     )
 
@@ -96,5 +102,6 @@ def get_pensioner(pensioner_id: int, db: DbSession, officer: CurrentOfficer) -> 
         template_updates=template.update_count if template else 0,
         device=DeviceOut.model_validate(device) if device else None,
         certificate_this_year=status_this_year(certs),
+        entitlement=entitlement_of(pensioner, certs),
         certificates=[CertificateOut.model_validate(c) for c in certs],
     )

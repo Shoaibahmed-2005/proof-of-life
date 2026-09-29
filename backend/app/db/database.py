@@ -39,7 +39,28 @@ def set_engine(engine) -> None:
 
 def init_db() -> None:
     from app.db import models  # noqa: F401  (register tables)
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    _add_missing_nullable_columns(engine)
+
+
+def _add_missing_nullable_columns(engine) -> None:
+    """
+    Minimal forward migration for SQLite dev databases: create_all() never
+    alters existing tables, so columns added in later milestones are added
+    here (nullable ones only; anything else needs a real migration tool).
+    """
+    if not str(engine.url).startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            existing = {row[1] for row in conn.exec_driver_sql(f'PRAGMA table_info("{table.name}")')}
+            if not existing:  # table doesn't exist (create_all normally makes it first)
+                continue
+            for column in table.columns:
+                if column.name not in existing and column.nullable:
+                    col_type = column.type.compile(dialect=engine.dialect)
+                    conn.exec_driver_sql(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}')
 
 
 def get_db() -> Generator[Session, None, None]:

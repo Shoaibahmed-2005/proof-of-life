@@ -436,3 +436,38 @@ Each milestone ends with: a build (or a teammate build if D1 is declined), an en
 - only AUTH QR codes are accepted by the app (M3/M4 add ENROLLMENT and LIFE_CERTIFICATE);
 - the dark HUD stays until the M4 screens;
 - the ROI overlay assumes the preview and analysis streams have the same aspect ratio.
+
+### M6: Ledger, DID, credentials, treasury (2026-09-30)
+
+⚠️ **Backend structure changed: please regenerate the Graphify graph.**
+
+**New services:**
+- `did.py`: `did:key` for P-256 (multicodec 0x1200, compressed point, base58btc), with round-trip decode.
+- `credentials.py`: a backend issuer key (`ISSUER_KEY_PEM`, or auto-generated `data/issuer_key.pem`) and W3C-VC-shaped `LifeCertificateCredential` JSON. The subject is the pensioner's DID only. The proof is ECDSA P-256 over canonical JSON, and verification uses the key inside the issuer's did:key.
+- `certificates.py`: **one issuance path** (credential → hash → `CERTIFICATE_ISSUED` ledger entry) shared by automatic approvals and officer approvals.
+- `entitlement.py`: RELEASED / AWAITING_CERTIFICATE / FROZEN / NOT_REGISTERED, plus the treasury summary.
+
+**New router `ledger.py`:**
+- `GET /ledger` (with `head`) and `GET /ledger/verify`;
+- `GET /credentials/issuer`, `GET /certificates/{id}/credential` and `POST /credentials/verify` (signature, issuer, validity window, ledger record, certificate status, chain);
+- `GET /treasury/summary` (officer).
+
+**Changed:**
+- **Registration approval** sets `pensioner.did` from the bound phone key and records the DID in `REGISTRATION_APPROVED`.
+- **CERTIFICATE_ISSUED:**
+  - ledger records now include `credential_hash`;
+  - WebSocket events carry `credential_hash` and `did`;
+  - pensioner detail and public lookup include `did` and `entitlement`;
+  - `life_certificates` gains `credential_json`.
+- **DB migration:** `init_db` adds missing *nullable* columns to existing SQLite tables. `create_all` doesn't; checked on the real dev DB.
+- **Seed:** demo pensioners get DIDs and signed credentials.
+
+**Bug found in testing:** the credential validity check compared timestamps as strings, which fails within the same second. It now uses real datetimes.
+
+**Tests:** 61 pass. They cover:
+- did:key format and round trip, plus base58 vectors;
+- that credentials hold no personal data, verify correctly, and catch tampering and a forged issuer;
+- review-approved credentials;
+- ledger endpoints and tamper detection;
+- treasury counts and amounts through freeze and restore;
+- the migration.

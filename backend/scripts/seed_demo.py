@@ -29,8 +29,9 @@ from app.db.models import (  # noqa: E402
 )
 from app.db.types import utcnow  # noqa: E402
 from app.services import face_match  # noqa: E402
+from app.services.did import did_from_pem  # noqa: E402
 from app.services.ledger import LedgerEvent, ledger  # noqa: E402
-from app.services.verification import certificate_record  # noqa: E402
+from app.services.certificates import certificate_record, record_issuance  # noqa: E402
 from scripts.simulate_phone import load_key, person_face  # noqa: E402
 
 # name, PPO, service no., bank last 4, monthly amount, scenario
@@ -77,6 +78,7 @@ def seed(force: bool = False) -> int:
             db.add(Device(pensioner_id=p.id, public_key_pem=pem, key_type=KeyType.SOFTWARE,
                           device_id=f"simulator:sim-{ppo}", active=True))
             p.status = PensionerStatus.ACTIVE
+            p.did = did_from_pem(pem)
             db.add(p)
             ledger.append(db, LedgerEvent.REGISTRATION_APPROVED, {
                 "pensioner_id": p.id, "seeded": True, "key_type": "SOFTWARE",
@@ -91,6 +93,9 @@ def seed(force: bool = False) -> int:
                                        reason_code=code, reason=reason)
                 db.add(cert)
                 db.flush()
+                if status is CertificateStatus.ISSUED:
+                    record_issuance(db, cert, p)  # signed credential + ledger entry
+                    return
                 event = {CertificateStatus.ISSUED: LedgerEvent.CERTIFICATE_ISSUED,
                          CertificateStatus.UNDER_REVIEW: LedgerEvent.CERTIFICATE_UNDER_REVIEW,
                          CertificateStatus.REJECTED: LedgerEvent.CERTIFICATE_REJECTED}[status]

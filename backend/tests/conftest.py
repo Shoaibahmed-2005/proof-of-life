@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import settings
 from app.core.security import reset_template_cipher
+from app.services.credentials import reset_issuer_key
 from app.db import database
 
 DIM = 128
@@ -31,6 +32,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
     monkeypatch.setattr(settings, "DATABASE_URL", "")
     monkeypatch.setattr(settings, "TEMPLATE_KEY", "")
+    monkeypatch.setattr(settings, "ISSUER_KEY_PEM", "")
     monkeypatch.setattr(settings, "PUBLIC_BASE_URL", "http://192.0.2.10:8000")
     # Fixed thresholds for the tests (real values come from calibration).
     monkeypatch.setattr(settings, "FACE_T_HIGH", 0.70)
@@ -40,12 +42,14 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "MAX_FAILED_ATTEMPTS", 3)
     database.set_engine(None)
     reset_template_cipher()
+    reset_issuer_key()
     from app.main import app
     with TestClient(app) as c:
         yield c
     database.get_engine().dispose()
     database.set_engine(None)
     reset_template_cipher()
+    reset_issuer_key()
 
 
 @pytest.fixture()

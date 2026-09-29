@@ -32,7 +32,8 @@ backend/
 │   │   ├── officers.py            # Demo officer login
 │   │   ├── pensioners.py          # Registration details, records, public status lookup
 │   │   ├── enroll.py              # Officer approves a captured registration
-│   │   └── reviews.py             # Review queue for borderline certificates
+│   │   ├── reviews.py             # Review queue: borderline certificates, frozen pensions
+│   │   └── ledger.py              # Ledger, credentials, treasury
 │   ├── schemas/                   # auth.py (signed payload), session.py, pensioner.py, health.py
 │   └── services/
 │       ├── verification.py        # The ordered verification pipeline (§5.2)
@@ -41,6 +42,10 @@ backend/
 │       ├── session.py             # DB-backed sessions, QR payload, challenge, base URL
 │       ├── pensioners.py          # ACTIVE / FROZEN rules (repeated failures, deadline)
 │       ├── ledger.py              # LedgerBackend interface + local hash chain
+│       ├── did.py                 # did:key for P-256 keys
+│       ├── credentials.py         # Signed life-certificate credentials (issuer key)
+│       ├── certificates.py        # Issuance: credential + ledger (auto and officer paths)
+│       ├── entitlement.py         # Entitlement state and the treasury summary
 │       ├── crypto.py              # ECDSA verification, key helpers
 │       ├── connection_manager.py  # WebSocket channels (per session + officer events)
 │       └── score_log.py           # Face-match scores for threshold calibration
@@ -77,12 +82,23 @@ All paths are under `/api/v1`. 🔒 = officer token required (`Authorization: Be
 | `POST` | `/reviews/{certificate_id}/decision` 🔒 | `{decision: APPROVE\|REJECT, reason}` |
 | `GET` | `/reviews/frozen` 🔒 | Frozen pensions with their recent attempts |
 | `POST` | `/reviews/frozen/{pensioner_id}/restore` 🔒 | `{reason}`: lift a freeze after resolving the case |
+| `GET` | `/ledger` | Hash-chained audit entries, newest first (`offset`, `limit`, `event_type`); `head` = latest hash |
+| `GET` | `/ledger/verify` | Recompute the whole chain; reports the first altered entry |
+| `GET` | `/credentials/issuer` | The portal's issuer `did:key` |
+| `GET` | `/certificates/{id}/credential` | Signed verifiable credential of an issued certificate |
+| `POST` | `/credentials/verify` | `{credential}` → checks signature, issuer, validity, ledger record, chain |
+| `GET` | `/treasury/summary` 🔒 | Entitlements released / awaiting / frozen (counts and amounts), certificates this year, rejections by reason |
 | `WS` | `/ws/{session_id}` | Portal: live events for one session |
 | `WS` | `/ws/events?token=` 🔒 | Officer dashboards: all events |
 | `WS` | `/ws/telemetry/{session_id}?nonce=` | Phone → portal scan progress (relayed) |
 | `WS` | `/ws/telemetry` | Legacy phone telemetry (log only) |
 
-Ledger, DID, credentials and treasury endpoints arrive in Milestone 6.
+## Ledger, DIDs and credentials (blockchain layer, §5.5)
+
+- **did:key:** when an officer approves a registration, the pensioner gets a `did:key` derived from their phone's P-256 key (it always starts `did:key:zDn`).
+- **Verifiable credential:** every issued life certificate, automatic or officer-approved, becomes a W3C-VC-shaped JSON credential signed by the portal's issuer key (P-256; the public key is inside the issuer's `did:key`). The subject is **only the pensioner's DID**: no name, PPO or scores. So it can be handed to a bank, who checks it with `POST /credentials/verify`.
+- **Ledger:** entries hold only hashes: registrations, status changes, reviews, and certificates (whose record includes the credential's hash). Each entry hashes the previous one. `GET /ledger/verify` recomputes the chain. `head` is the single value to anchor on a public chain (Hyperledger Fabric or a Polygon testnet) by implementing `LedgerBackend` in `services/ledger.py`.
+- **Entitlement as an asset owned by the DID:** for the current year it is `RELEASED` (certificate issued), `AWAITING_CERTIFICATE`, `FROZEN` or `NOT_REGISTERED`. Only `RELEASED` would be paid.
 
 ## WebSocket events
 
@@ -168,6 +184,7 @@ python scripts/calibrate_thresholds.py report                         # suggests
 |----------|---------|-------------|
 | `SECRET_KEY` | dev value | Signs officer tokens. Change for any shared deployment. |
 | `TEMPLATE_KEY` | auto (dev) | Fernet key encrypting face templates at rest |
+| `ISSUER_KEY_PEM` | auto (dev) | P-256 private key that signs credentials (defines the issuer DID) |
 | `DATABASE_URL` | `sqlite:///data/iob.db` | Any SQLAlchemy URL |
 | `PUBLIC_BASE_URL` | auto (LAN IP) | Backend URL put into QR codes |
 | `SESSION_EXPIRY_SECONDS` | `300` | QR/session lifetime |
@@ -194,5 +211,6 @@ python scripts/calibrate_thresholds.py report                         # suggests
 - rPPG accuracy varies with lighting, skin tone and age; borderline cases fall back to officer review.
 - Registration relies on an officer checking physical ID; DigiLocker or the Aadhaar Secure QR code is the production path for ID authenticity.
 - The key security level (StrongBox/TEE) is reported by the app; verifying the Android key attestation chain against Google's root is future work.
-- The ledger is a local hash chain, designed to be anchored on a real blockchain (Milestone 6).
+- The ledger is a local hash chain, designed to be anchored on a real blockchain; anchoring isn't implemented yet.
+- Credentials use a simple documented proof format (ECDSA P-256 over canonical JSON), not a full W3C Data Integrity cryptosuite.
 - Repeated failed attempts freeze a pension by design, so someone who knows a pension ID and has the registered phone could trigger a freeze; an officer can restore it through the review queue.

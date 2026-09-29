@@ -12,6 +12,7 @@ from app.db.models import (
 from app.db.types import utcnow
 from app.schemas.pensioner import EnrollComplete, EnrollCompleteResponse, PensionerOut
 from app.services.connection_manager import manager
+from app.services.did import did_from_pem
 from app.services.ledger import LedgerEvent, ledger
 
 router = APIRouter()
@@ -40,10 +41,12 @@ async def complete_enrollment(body: EnrollComplete, db: DbSession,
     pensioner.status = PensionerStatus.ACTIVE
     pensioner.status_reason = None
     pensioner.failed_attempts = 0
+    # The pensioner's decentralized identifier, derived from the bound phone key.
+    pensioner.did = did_from_pem(device.public_key_pem)
     db.add(device)
     db.add(pensioner)
     entry = ledger.append(db, LedgerEvent.REGISTRATION_APPROVED, {
-        "pensioner_id": pensioner.id, "approved_by": officer.id,
+        "pensioner_id": pensioner.id, "did": pensioner.did, "approved_by": officer.id,
         "key_type": device.key_type.value, "model_version": template.model_version,
         "at": utcnow().isoformat(),
     }, ref=f"pensioner:{pensioner.id}")
@@ -57,7 +60,7 @@ async def complete_enrollment(body: EnrollComplete, db: DbSession,
     await manager.publish(last_capture.session_id if last_capture else None, {
         "event": "ENROLLMENT_APPROVED", "pensioner_id": pensioner.id,
         "session_id": last_capture.session_id if last_capture else None,
-        "ledger_hash": entry.entry_hash, "at": utcnow().isoformat(),
+        "ledger_hash": entry.entry_hash, "did": pensioner.did, "at": utcnow().isoformat(),
     })
     return EnrollCompleteResponse(pensioner=PensionerOut.model_validate(pensioner),
                                   ledger_hash=entry.entry_hash)

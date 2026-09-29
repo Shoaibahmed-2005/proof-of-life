@@ -16,6 +16,7 @@ from app.schemas.pensioner import (
     CertificateOut, FrozenItem, PensionerOut, RestoreRequest, ReviewDecision,
     ReviewDecisionResponse, ReviewItem,
 )
+from app.services import certificates
 from app.services import pensioners as pensioner_service
 from app.services.connection_manager import manager
 from app.services.ledger import LedgerEvent, ledger
@@ -91,13 +92,17 @@ async def decide(certificate_id: int, body: ReviewDecision, db: DbSession,
     else:
         pensioner_service.record_failure(db, pensioner)
 
-    entry = ledger.append(db, LedgerEvent.REVIEW_DECISION, {
-        "certificate_id": cert.id, "pensioner_id": cert.pensioner_id, "year": cert.year,
-        "decision": body.decision, "reviewed_by": officer.id, "at": cert.reviewed_at.isoformat(),
-    }, ref=f"certificate:{cert.id}")
-    cert.ledger_hash = entry.entry_hash
-    db.add(cert)
-    db.commit()
+    if approve:
+        # Same issuance path as automatic approvals: signed credential + its hash on the ledger.
+        certificates.record_issuance(db, cert, pensioner, reviewed_by=officer.id)
+    else:
+        entry = ledger.append(db, LedgerEvent.REVIEW_DECISION, {
+            "certificate_id": cert.id, "pensioner_id": cert.pensioner_id, "year": cert.year,
+            "decision": body.decision, "reviewed_by": officer.id, "at": cert.reviewed_at.isoformat(),
+        }, ref=f"certificate:{cert.id}")
+        cert.ledger_hash = entry.entry_hash
+        db.add(cert)
+        db.commit()
     db.refresh(cert)
     db.refresh(pensioner)
 
@@ -106,7 +111,8 @@ async def decide(certificate_id: int, body: ReviewDecision, db: DbSession,
         "session_id": cert.session_id, "pensioner_id": cert.pensioner_id,
         "certificate_id": cert.id, "year": cert.year, "reviewed": True,
         "reason_code": cert.reason_code, "reason": cert.reason,
-        "ledger_hash": cert.ledger_hash, "pension_status": pensioner.status.value,
+        "ledger_hash": cert.ledger_hash, "credential_hash": cert.credential_hash,
+        "pension_status": pensioner.status.value,
         "at": utcnow().isoformat(),
     })
     return ReviewDecisionResponse(certificate=CertificateOut.model_validate(cert),

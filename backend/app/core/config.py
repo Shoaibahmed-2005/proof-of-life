@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # Fernet key for encrypting face templates at rest. If empty, a key is
     # generated once and stored in DATA_DIR/template.key (development only).
     TEMPLATE_KEY: str = ""
+    # PEM private key (P-256) that signs life-certificate credentials. If
+    # empty, one is generated once in DATA_DIR/issuer_key.pem (development).
+    ISSUER_KEY_PEM: str = ""
 
     # ── Storage ─────────────────────────────────────────────────────────
     DATA_DIR: Path = BACKEND_DIR / "data"

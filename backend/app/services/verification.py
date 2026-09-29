@@ -37,7 +37,7 @@ from app.db.models import (
 )
 from app.db.types import utcnow
 from app.schemas.auth import BiometricPayload, VerifyRequest, VerifyResponse
-from app.services import face_match, pensioners
+from app.services import certificates, face_match, pensioners
 from app.services import session as sessions
 from app.services.crypto import (
     InvalidPublicKeyError, SignatureVerificationError, load_public_key_from_der,
@@ -399,21 +399,27 @@ def _verify_life_certificate(db: Session, session: AuthSession, payload: Biometr
             db.add(template)
         pensioner.failed_attempts = 0
         db.add(pensioner)
-        event_type, ws_event = LedgerEvent.CERTIFICATE_ISSUED, "CERTIFICATE_ISSUED"
+        ws_event = "CERTIFICATE_ISSUED"
     else:
-        event_type, ws_event = LedgerEvent.CERTIFICATE_UNDER_REVIEW, "UNDER_REVIEW"
+        ws_event = "UNDER_REVIEW"
 
     sessions.finish(db, session, SessionStatus.COMPLETED, outcome=status.value,
                     reason_code=reason_code, reason=reason, certificate_id=cert.id,
                     bpm=payload.bpm, device_id=payload.device_id, commit=False)
-    entry = ledger.append(db, event_type, certificate_record(cert), ref=f"certificate:{cert.id}")
-    cert.ledger_hash = entry.entry_hash
-    db.add(cert)
-    db.commit()
+    if status is CertificateStatus.ISSUED:
+        # Signed credential (subject = pensioner's did:key) + its hash on the ledger.
+        certificates.record_issuance(db, cert, pensioner)
+    else:
+        entry = ledger.append(db, LedgerEvent.CERTIFICATE_UNDER_REVIEW, certificates.certificate_record(cert),
+                              ref=f"certificate:{cert.id}")
+        cert.ledger_hash = entry.entry_hash
+        db.add(cert)
+        db.commit()
 
     event = _base_event(ws_event, session, certificate_id=cert.id, year=cert.year,
                         match_score=cert.match_score, bpm=cert.bpm, snr=cert.snr,
                         challenge_type=cert.challenge_type, ledger_hash=cert.ledger_hash,
+                        credential_hash=cert.credential_hash, did=pensioner.did,
                         reason_code=reason_code, reason=reason)
     return VerificationResult(VerifyResponse(
         status="ACCESS_GRANTED" if status is CertificateStatus.ISSUED else "UNDER_REVIEW",
@@ -421,11 +427,3 @@ def _verify_life_certificate(db: Session, session: AuthSession, payload: Biometr
         purpose=session.purpose, outcome=status.value, certificate_id=cert.id,
     ), [(session.session_id, event)])
 
-
-def certificate_record(cert: LifeCertificate) -> dict[str, Any]:
-    """The certificate facts that are hashed into the ledger (no personal data)."""
-    return {
-        "certificate_id": cert.id, "pensioner_id": cert.pensioner_id, "year": cert.year,
-        "status": cert.status.value, "match_score": cert.match_score,
-        "session_id": cert.session_id, "created_at": cert.created_at.isoformat(),
-    }

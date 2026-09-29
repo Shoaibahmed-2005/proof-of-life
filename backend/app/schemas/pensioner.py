@@ -106,6 +106,7 @@ class PensionerDetail(PensionerOut):
     template_updates: int = 0
     device: Optional[DeviceOut] = None
     certificate_this_year: Optional[CertificateStatus] = None
+    entitlement: Optional[str] = None  # RELEASED / AWAITING_CERTIFICATE / FROZEN / NOT_REGISTERED
     certificates: list[CertificateOut] = []
 
 
@@ -116,7 +117,9 @@ class PensionerPublic(BaseModel):
     ppo_number: str
     status: PensionerStatus
     status_reason: Optional[str] = None
+    did: Optional[str] = None
     certificate_this_year: Optional[CertificateStatus] = None
+    entitlement: Optional[str] = None
     certificates: list[CertificateOut] = []
 
 
