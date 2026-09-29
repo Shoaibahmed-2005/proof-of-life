@@ -84,20 +84,27 @@ Remove them after the event: `netsh advfirewall firewall delete rule name="Jeeva
 
 **7. A second phone.** Any phone on the same Wi-Fi can scan a Practice Scan QR code. For registration and life certificates (Milestones 3–4), each pensioner is bound to the phone used at registration, so register a *new* test pensioner with the second phone rather than reusing one registered on the first. Using another phone for an existing pensioner is correctly rejected as "not the registered device".
 
-## 3. What the app does (Milestone 2)
+## 3. What the app does (version 4.0-challenge)
 
-**Scan QR → connect → measure pulse → send signed result → show result.**
+**Four screens: Scan QR → Consent → Face Scan → Result** (DESIGN.md §7: white screens, orange buttons, green success).
 
-- The pulse is measured from the forehead and both cheeks inside the detected face box.
-- The rPPG engine uses a 10 s window, a 0.7–4 Hz band-pass filter, and an SNR in dB that is updated twice a second. It shows "Measuring…" until 5 estimates in a row agree within ±3 BPM and the SNR reaches the minimum from the QR code (default 3.0 dB).
-- The stable result is signed in Titan M2 (StrongBox) and posted to the backend. The portal updates live.
-- With no stable pulse within 30 s of seeing a face (e.g. a photo), the app sends a signed "no pulse" result. Both the phone and the portal then show "No pulse detected".
-- Face registration and life-certificate QR codes need the Milestone 3–4 app. This version says so instead of failing silently.
+1. **Scan QR:** reads `{base_url, session_id, purpose, nonce, challenge, liveness gate}` from the portal's QR code and checks that the laptop is reachable.
+2. **Consent:** plain-language points for the purpose (practice, registration or life certificate). Nothing starts until the pensioner agrees.
+3. **Face Scan** (front camera, one tracked face only):
+   - **Pulse:** forehead and both cheeks inside the face box. 10 s window, 0.7–4 Hz band-pass, SNR in dB twice a second; stable when 5 estimates in a row agree within ±3 BPM and the SNR reaches the QR's minimum (default 3.0 dB). With no stable pulse within 30 s the result is "no pulse".
+   - **Challenge** (registration and life certificate): the backend's random action (blink twice, turn left, turn right), checked with ML Kit landmarks within the QR's time limit (default 8 s).
+   - **Face:** MobileFaceNet embeddings every few frames. The best 15 are averaged into the registration template, the best 5 into the life-certificate probe.
+   - A second face in view stops the scan (MULTIPLE_FACES). Losing the face restarts it.
+4. **Signed result:** the payload (build-prompt §4.4, including the key type StrongBox/TEE) is signed in the phone's key store and posted. **Result** shows approved / under review / rejected with the reason, at the same moment as the portal.
+
+No photos or videos are stored or sent. Practice scans skip the challenge and send no face data.
+
+If the build fails, `TESTING_CHECKLIST.md` section B lists which commit to check first.
 
 ## 4. Logs
 
 ```powershell
-adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelDiag:V SentinelTelemetry:V TelemetryStreamer:V AndroidRuntime:E *:S
+adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelDiag:V SentinelTelemetry:V TelemetryStreamer:V SentinelFace:V SentinelChallenge:V AndroidRuntime:E *:S
 ```
 
 `SentinelHardNative` prints every estimate (BPM, SNR, window fill, stable, skin fraction), which is what threshold calibration needs.

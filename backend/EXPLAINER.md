@@ -1,162 +1,133 @@
-# Internet of Bodies (IoB) Biometric Authentication — System Architecture & Concept Guide
+# Jeevan Suraksha: How the System Works (Concept Guide)
 
-Welcome to the **Internet of Bodies (IoB) Command Center** guide! This document is designed to teach you **what is happening in this project**, **how every piece works together under the hood**, and **the exact concepts and learning resources you need to master it**.
-
----
-
-## 1. What is Happening? (The Big Picture)
-
-### The Core Problem
-Standard two-factor authentication (2FA) or password logins can be phished, intercepted, or stolen.
-
-### The IoB Solution
-We are building a **hardware-bound, liveness-verified biometric authentication system**. To log into a web portal (e.g., Netbanking), you cannot just type a password. Instead:
-1. The web screen shows a dynamic **QR Code** containing a temporary session ID.
-2. An Android device (Pixel 7) scans the QR code.
-3. The phone's front camera measures your real-time **pulse (heart rate / BPM)** using micro-fluctuations in skin color (**rPPG**).
-4. The phone packages your pulse data with the session ID and **signs it physically inside the Titan M2 hardware security chip** using a private key that *never leaves the chip*.
-5. The phone sends this signed payload to our **FastAPI Backend**.
-6. The Backend verifies the cryptographic signature, checks that your heart rate is biologically real (e.g., 40–220 BPM), and **instantly unlocks the web session over a WebSocket connection**.
+This guide explains **what the system does, how the pieces fit together, and the concepts behind it**, so that anyone on the team can present it. It covers the whole project: the Android app, this FastAPI backend and the web portal. For setup and API details see `README.md`; for the demo see `../DEMO_SCRIPT.md`.
 
 ---
 
-## 2. System Architecture & The 4 Roles
+## 1. The problem and the idea
 
-The system is split among four specialized components:
+Every year, each pensioner must prove they are alive (a **life certificate**) or the pension stops. Travelling to an office is hard for elderly and disabled pensioners, and remote checks can be fooled with a photo or a video.
+
+Jeevan Suraksha lets the pensioner do it **at home with their own phone**, and makes three independent checks:
+
+| Check | Question it answers | How |
+|---|---|---|
+| **Liveness (rPPG)** | Is a living person in front of the camera? | The phone measures the pulse from tiny colour changes in the face skin. A photo has no pulse. |
+| **Random challenge** | Is it happening now, not a recording? | The backend picks an action (blink twice, turn left, turn right) when the session is created. A pre-recorded video can't know which one, or when it will be asked. |
+| **1:1 face match** | Is it the registered pensioner? | The face is turned into 192 numbers (MobileFaceNet) and compared only with *that* pensioner's registered template. |
+
+The result is **signed inside the phone's security chip** (Titan M2 / StrongBox on a Pixel), so the backend knows it came from the registered phone and wasn't altered.
+
+---
+
+## 2. The parts
 
 ```
-┌─────────────────────────┐               ┌──────────────────────────┐
-│  React Frontend (Web)   │               │   Pixel 7 Android App    │
-│  (Frontend Developer)   │               │                          │
-│                         │               │  ┌────────────────────┐  │
-│  - Displays Login Portal│               │  │  Dev B (rPPG C++)  │  │
-│  - Renders QR Code      │               │  │  - CameraX + OpenCV│  │
-│  - Real-time Dashboard  │               │  │  - Extracts BPM    │  │
-└────────────▲────────────┘               │  └─────────┬──────────┘  │
-             │                            │            │ BPM         │
-             │ WebSockets                 │  ┌─────────▼──────────┐  │
-             │ (Bi-directional)         │  │ Dev A (Kotlin / HW)│  │
-             │                            │  │ - Scans QR Code    │  │
-             │                            │  │ - Signs via Titan  │  │
-             │                            │  │   M2 StrongBox     │  │
-             │                            │  └─────────┬──────────┘  │
-             │                            └────────────┼─────────────┘
-             │                                         │ Signed Payload
-             │                                         │ (HTTPS POST)
-┌────────────▼─────────────────────────────────────────▼─────────────┐
-│                 FastAPI Backend (Command Center)                  │
-│                      (Your Role: FastAPI Engineer)                │
-│                                                                   │
-│  - SessionManager: Generates & manages session life cycle          │
-│  - ConnectionManager: Pushes real-time events over WebSockets      │
-│  - Crypto Service: Verifies Titan M2 ECDSA-SHA256 signatures      │
-└───────────────────────────────────────────────────────────────────┘
+ Web portal (laptop, React)            Android app (Pixel 7, Kotlin + C++)
+ - officer: register, review,          - Scan QR → Consent → Face Scan → Result
+   records, treasury, ledger           - rPPG engine in C++ (POS, band-pass, SNR, stability gate)
+ - pensioner: submit, practice,        - ML Kit face detection + tracking (one face only)
+   check status                        - MobileFaceNet embeddings (LiteRT)
+        ▲  WebSocket (live steps)      - challenge check from ML Kit landmarks
+        │                              - ECDSA P-256 signature in StrongBox / TEE
+        │                                         │  HTTP POST (signed payload)
+ ┌──────┴─────────────────────────────────────────▼──────┐
+ │ FastAPI backend                                        │
+ │ sessions + QR · signature check · device binding ·     │
+ │ liveness + challenge rules · 1:1 face match (3 bands) · │
+ │ templates (encrypted) · freeze rules · review queue ·  │
+ │ hash-chained audit ledger · did:key · signed credential │
+ └────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. End-to-End Authentication Flow (Step-by-Step)
+## 3. The two flows
 
-Here is the exact sequence of events when a user logs in:
+### Registration (once, officer-assisted)
+1. The officer checks the pensioner's physical ID in person, then enters their details in **Register Pensioner** (dummy data for the demo; never Aadhaar numbers).
+2. The portal shows a QR code: `{base_url, session_id, purpose: ENROLLMENT, nonce, challenge, liveness gate settings}`.
+3. The pensioner scans it with the app, agrees to the consent screen, and does the face scan: stable pulse → the random challenge → face frames.
+4. The app averages its **best 15 face embeddings** into a reference template, signs `{session, nonce, pulse, challenge result, template, model version, key type, consent}` and posts it.
+5. The backend stores the template **encrypted** and binds the phone's **public key** to the pensioner. The officer clicks **Approve** and the pension is **Active**.
 
-1. **User opens Netbanking Login Page** on React frontend.
-2. **React calls `POST /api/v1/sessions`** on FastAPI backend to get a unique `session_id`.
-3. **React renders `session_id` as a QR code** on screen and connects to `WS /api/v1/ws/{session_id}`.
-4. **Android App (Pixel 7)** scans the QR code (Dev A) to extract `session_id`.
-5. **Android App processes face frames** with OpenCV (Dev B) to calculate live pulse/BPM (e.g., 72 BPM).
-6. **Titan M2 Chip signs payload** (`{session_id, bpm, timestamp, device_id}`) using physical hardware private key (Dev A).
-7. **Android posts signed payload to `POST /api/v1/auth/verify`** on FastAPI backend.
-8. **FastAPI Backend runs 6-step verification**:
-   - Signature check via ECDSA-SHA256
-   - Payload deserialization
-   - Session existence & `PENDING` state check
-   - BPM biological bounds check ($40 \le \text{BPM} \le 220$)
-   - Timestamp freshness check
-   - Grants session & triggers WebSocket push (`ACCESS_GRANTED`)
-9. **React UI receives WebSocket push** and instantly animates to the secure Account Dashboard.
+### Annual life certificate (at home)
+1. The pensioner enters their pension ID on the portal and gets a QR code (`purpose: LIFE_CERTIFICATE`).
+2. Same scan on the same phone; this time the app sends a **probe embedding** (average of the best 5 frames).
+3. The backend runs the pipeline (section 4) and decides:
+   - **strong match + live + challenge passed** → certificate issued, the template is gently updated (ageing);
+   - **borderline match** → officer **Review Queue**;
+   - **mismatch / no pulse / challenge failed** → rejected. Three such failures **freeze** the pension (never cancel it) until an officer restores it.
+4. The portal updates live over the WebSocket: *Waiting for scan → Measuring pulse → Challenge → Face match → Result*.
 
 ---
 
-## 4. How the FastAPI Backend Works (Deep-Dive)
+## 4. The verification pipeline (backend)
 
-As the **FastAPI Engineer**, your code acts as the traffic controller and verifier. Here is how your 3 main modules operate:
+`app/services/verification.py`, fail fast, in this order:
 
-### A. Connection Manager (`app/services/connection_manager.py`)
-- **What it does**: Holds an active dictionary of open WebSockets (`dict[session_id, WebSocket]`).
-- **Why it matters**: WebSockets allow the server to **push** messages to the browser without the browser having to constantly ask ("poll") the server if authentication completed.
-- **Key Method**: `send_to_session(session_id, data)` targets a specific user's browser tab to send `"ACCESS_GRANTED"`.
+1. **Signature**: ECDSA-SHA256 over the exact payload bytes (P-256).
+2. **Schema**: the payload parses; face data is required only when the pulse and challenge passed.
+3. **Session**: exists, right purpose, right nonce, not expired, then **claimed atomically** (single use, so a replay of the same payload fails).
+4. **Device binding**: a life certificate must be signed by the key registered for that pensioner.
+5. **Freshness and consent**.
+6. **App abort**: if the app stopped the scan (`MULTIPLE_FACES`, `FACE_NOT_CAPTURED`), it is rejected with that reason.
+7. **Liveness**: BPM in 40–220, SNR ≥ `MIN_SNR_DB`, and the phone's stability verdict.
+8. **Challenge**: same challenge id as issued, and passed.
+9. **Face match**: cosine similarity to the pensioner's current template **and** the original anchor template → three bands.
+10. **Record**: certificate, pension status, template update, ledger entry, signed credential, WebSocket events.
 
-### B. Session Manager (`app/services/session.py`)
-- **What it does**: Manages the state machine of a session:
-  $$\text{PENDING} \longrightarrow \text{VERIFIED} \longrightarrow \text{GRANTED}$$
-  $$\searrow \quad \text{EXPIRED}$$
-- **Key Security Feature**: Sessions expire automatically after 300 seconds (5 minutes). A background `asyncio` task purges stale sessions every 60 seconds.
-
-### C. Cryptographic Verifier (`app/services/crypto.py`)
-- **What it does**: Verifies the digital signature produced by Google's Titan M2 security chip.
-- **How ECDSA Works**:
-  1. The Titan M2 chip on the Pixel 7 generated an **Elliptic Curve (EC)** key pair (`secp256r1` / `P-256`).
-  2. The **Private Key** lives physically inside the Titan M2 hardware and can never be read by software.
-  3. The phone sends the **Public Key**, the **Payload** (`{session_id, bpm, timestamp, device_id}`), and the **Signature**.
-  4. The backend uses Python's `cryptography` library to run:
-     $$\text{verify}(\text{Signature}, \text{Payload}, \text{Public Key}) \overset{?}{=} \text{True}$$
-  5. If anyone altered even a single bit of the BPM or session ID during transit, `verify()` throws an `InvalidSignature` error.
-
-### D. The 6-Step Fail-Fast Pipeline (`app/routers/auth.py`)
-When `POST /api/v1/auth/verify` receives data from the Pixel 7, it runs these 6 strict checks:
-1. **Signature Verification**: Validates ECDSA-SHA256 signature using `crypto.py`.
-2. **Payload Parsing**: Unpacks base64 JSON into a validated `BiometricPayload` object.
-3. **Session State Check**: Verifies `session_id` exists in `SessionManager` and is currently in `PENDING` state.
-4. **BPM Plausibility Check**: Ensures heart rate is within biological bounds ($40 \le \text{BPM} \le 220$).
-5. **Timestamp Freshness**: Rejects payloads older than the session expiry window to prevent **replay attacks**.
-6. **State Transition & Push**: Marks session as `GRANTED` and pushes `ACCESS_GRANTED` to the frontend via `ConnectionManager`.
+Only `NO_PULSE`, `CHALLENGE_FAILED` and `FACE_MISMATCH` count toward freezing. Problems like "wrong phone" or "someone walked into the frame" don't, so a stranger can't freeze a pension by accident.
 
 ---
 
-## 5. Key Concepts & Resources to Master
+## 5. Key concepts
 
-To thoroughly understand and speak confidently about this system, here are the key technical concepts and recommended reading resources:
+### rPPG (remote photoplethysmography)
+Each heartbeat pushes blood into the face and changes skin colour very slightly. The app averages the skin pixels of the forehead and cheeks in every frame, and turns the colour signal into a pulse with the **POS** method (Wang et al., "Algorithmic principles of remote PPG", IEEE TBME 2017). It then band-pass filters 0.7–4 Hz (42–240 BPM), finds the strongest frequency in a 10 s window, and measures the **SNR** (how much the pulse stands out from noise). A result counts only when 5 estimates in a row agree within ±3 BPM and the SNR is above the minimum: that is the "stable reading".
 
-### 1. WebSockets & Real-Time Communication
-* **Concept**: Unlike standard HTTP (request-response), WebSockets establish a single long-lived TCP connection for instant bi-directional messaging.
-* **Why we use it**: To push the `ACCESS_GRANTED` signal to the web frontend the exact millisecond the phone finishes verification.
-* **Recommended Resources**:
-  - [MDN WebSockets API Guide](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
-  - [FastAPI WebSockets Documentation](https://fastapi.tiangolo.com/advanced/websockets/)
+### Face embeddings
+A neural network (MobileFaceNet) turns an aligned 112×112 face crop into 192 numbers. Two photos of the same person give similar numbers (high **cosine similarity**), different people give lower values. We store numbers, not pictures, and they are encrypted at rest. Scores from one model can't be compared with another's, so the model version is part of every payload.
 
-### 2. Public-Key Cryptography & ECDSA
-* **Concept**: Asymmetric encryption using Elliptic Curve Digital Signature Algorithm (ECDSA). One key signs (Private), another verifies (Public).
-* **Why we use it**: Guarantees that the biometric data came from an authentic, untampered physical device.
-* **Recommended Resources**:
-  - [Computerphile: Elliptic Curves (Video)](https://www.youtube.com/watch?v=NF1pwjL9-DE)
-  - [Python `cryptography` Library Documentation](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/ec/)
+### Public-key signatures (ECDSA P-256)
+The phone has a private key that signs, and the backend has the matching public key that verifies. Changing a single byte of the payload breaks the signature.
 
-### 3. Hardware Root of Trust (Titan M2 & Android KeyStore)
-* **Concept**: A dedicated tamper-resistant microchip (StrongBox) built into the Google Pixel phone that generates and locks cryptographic keys in physical hardware.
-* **Why we use it**: Even if malware infects the Android operating system, it cannot steal the private key from Titan M2.
-* **Recommended Resources**:
-  - [Android Security: Hardware-backed KeyStore](https://developer.android.com/training/articles/keystore)
-  - [Google Titan M2 Security Chip Overview](https://security.googleblog.com/2021/10/titan-m2-user-guide.html)
+### Hardware-backed keys (StrongBox / Titan M2, TEE)
+On a Pixel the private key is created inside the Titan M2 chip and never leaves it, even if the phone's software is compromised. The app reports where its key lives (StrongBox, TEE or software), and the portal shows it.
 
-### 4. Remote Photoplethysmography (rPPG)
-* **Concept**: Measuring blood volume pulse (BPM) remotely by capturing ambient light reflected off human skin using standard RGB camera sensors.
-* **Why we use it**: Proves the person in front of the phone is a live human being with a beating heart, preventing photo/video spoofing.
-* **Recommended Resources**:
-  - [OpenCV Documentation](https://docs.opencv.org/)
-  - [rPPG Principles & Facial ROI Tracking Overview](https://en.wikipedia.org/wiki/Photoplethysmogram)
+### Hash-chained ledger, DIDs, credentials
+Each event (registration, certificate, freeze, restore) is added to an **append-only log** in which every entry includes the hash of the previous one. Changing any old entry breaks the chain, and **Verify chain integrity** on the portal detects it. Pensioners get a `did:key` identifier derived from their device key, and each certificate is issued as a **signed credential** (W3C Verifiable Credential shape) that anyone can check. The ledger is local, and designed to be anchored on a public blockchain later.
+
+### WebSockets
+A long-lived connection lets the backend push each step to the portal the moment it happens, which is why the laptop updates live while the phone scans.
+
+**Further reading:**
+- [MDN WebSockets API](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
+- [FastAPI WebSockets](https://fastapi.tiangolo.com/advanced/websockets/)
+- [Android Keystore](https://developer.android.com/training/articles/keystore)
+- [Python `cryptography`: elliptic curves](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/ec/)
+- [Photoplethysmogram (overview)](https://en.wikipedia.org/wiki/Photoplethysmogram)
 
 ---
 
-## 6. How to Test Your Command Center
+## 6. What it does not do (be honest in the presentation)
 
-### Step 1: Start the Backend
-```bash
-cd d:/IOB/backend
-python -m venv venv
+- **Screen-replay detection** (moiré, screen borders) is not implemented. A video is stopped by the random challenge, but a *live* deepfake that follows the prompt and carries a pulse-like colour signal is out of scope.
+- **The thresholds are placeholders** until calibrated on our own scans: `MIN_SNR_DB`, and the face bands `FACE_T_HIGH`/`FACE_T_LOW`/`FACE_ANCHOR_MIN`. Use `scripts/calibrate_thresholds.py`. Don't lower `MIN_SNR_DB` without measurements: it also makes photos easier to pass.
+- **rPPG depends on light, camera and skin tone.** Poor conditions lead to "no pulse" or officer review, not to a false pass.
+- **The key type is reported by the app.** Checking the Android key-attestation chain against Google's root is future work.
+- **Identity at registration** rests on the officer's in-person ID check. DigiLocker or the Aadhaar Secure QR code is the production path.
+- **The face model's training data** is not documented by its source (see `../MODEL_INFO.md`). Confirm it, or retrain, before any production use.
+
+---
+
+## 7. Try it
+
+```powershell
+cd backend
 .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python run.py   # listens on 0.0.0.0:8000; plain `uvicorn app.main:app` would be localhost-only
+python run.py                    # 0.0.0.0:8000; prints the address the phone will use
+python scripts/demo_check.py     # runs the five demo scenarios end to end (simulated phone)
 ```
 
-### Step 2: Open Interactive API Docs
-Navigate to [http://localhost:8000/docs](http://localhost:8000/docs) in your browser. You can test session creation (`POST /api/v1/sessions`) directly from the UI!
+Open http://localhost:8000/docs for the interactive API, and the portal (`npm run dev` in the repo root) at http://localhost:5173.

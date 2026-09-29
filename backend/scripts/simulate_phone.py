@@ -14,6 +14,7 @@ Use it to exercise the portal and backend without a phone:
   python scripts/simulate_phone.py --qr "<qr json>" --person A --no-pulse   # photo attack
   python scripts/simulate_phone.py --qr "<qr json>" --person A --challenge-fail  # video attack
   python scripts/simulate_phone.py --qr "<qr json>" --person A --similarity 0.6  # borderline
+  python scripts/simulate_phone.py --qr "<qr json>" --person A --multiple-faces  # someone else in view
 
 Each --person gets a fixed synthetic face; each --device a fixed key.
 Run from the backend/ folder.
@@ -87,8 +88,8 @@ def build_request(qr: dict, args) -> dict:
         "snr": 1.0 if args.no_pulse else args.snr,
         "liveness_passed": not args.no_pulse,
         "challenge_id": (qr.get("challenge") or {}).get("id"),
-        "challenge_passed": not args.challenge_fail,
-        "frames_used": 15,
+        "challenge_passed": not (args.challenge_fail or args.no_pulse or getattr(args, "multiple_faces", False)),
+        "frames_used": 15 if purpose == "ENROLLMENT" else 5,
         "app_version": "simulator",
         "model_version": settings.FACE_MODEL_VERSION,
         "key_security_level": "SOFTWARE",
@@ -103,7 +104,10 @@ def build_request(qr: dict, args) -> dict:
             "fps_range": "[30,30]", "device_model": "simulator",
         },
     }
-    if purpose == "ENROLLMENT":
+    if getattr(args, "multiple_faces", False):  # the app stops the scan itself and says why (signed)
+        payload.update(liveness_passed=False, abort_reason="MULTIPLE_FACES")
+        payload.pop("challenge_passed")
+    elif purpose == "ENROLLMENT":
         payload["reference_template"] = face
     elif purpose == "LIFE_CERTIFICATE":
         payload["face_embedding"] = probe_with_similarity(face, args.similarity, seed)
@@ -143,6 +147,24 @@ def stream_telemetry(base: str, qr: dict, args) -> None:
                 await ws.send(json.dumps({"type": "measuring", "bpm": bpm, "snr": snr,
                                           "progress": i / steps, "stable": i == steps and not args.no_pulse}))
                 await ws.recv()
+                if getattr(args, "multiple_faces", False) and i == steps // 2:
+                    await ws.send(json.dumps({"type": "multiple_faces", "message": "2 faces in view"}))
+                    await ws.recv()
+                    return
+            if args.no_pulse:
+                return
+            await ws.send(json.dumps({"type": "stable_reading", "bpm": args.bpm, "snr": args.snr}))
+            await ws.recv()
+            challenge = (qr.get("challenge") or {}).get("type")
+            if not challenge:  # practice scan: no challenge
+                return
+            # Like the app (Milestone 4): the challenge is shown after the pulse is steady.
+            await ws.send(json.dumps({"type": "challenge_issued", "challenge_type": challenge}))
+            await ws.recv()
+            await asyncio.sleep(args.telemetry_interval * 2)
+            done = "challenge_failed" if args.challenge_fail else "challenge_passed"
+            await ws.send(json.dumps({"type": done, "challenge_type": challenge}))
+            await ws.recv()
 
     try:
         asyncio.run(run())
@@ -161,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snr", type=float, default=7.5, help="rPPG SNR in dB")
     parser.add_argument("--no-pulse", action="store_true", help="Simulate a photo (liveness fails)")
     parser.add_argument("--challenge-fail", action="store_true", help="Simulate a video replay")
+    parser.add_argument("--multiple-faces", action="store_true",
+                        help="A second face appears: the app aborts with MULTIPLE_FACES")
     parser.add_argument("--base-url", help="Override the backend URL from the QR")
     parser.add_argument("--legacy", action="store_true", help="AUTH: send the original app's payload")
     parser.add_argument("--no-telemetry", action="store_true", help="Don't stream live MEASURING events")

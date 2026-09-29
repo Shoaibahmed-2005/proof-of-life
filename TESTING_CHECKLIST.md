@@ -4,6 +4,38 @@ This is for the teammate who builds and tests the Android app. Claude writes the
 
 Each milestone's section is updated when that milestone is delivered. Thresholds marked _(calibrating)_ are first guesses that your results will tune.
 
+## ▶ One combined test run (everything, in this order)
+
+All milestones are delivered (app version **4.0-challenge**). Do one full round in this order; each step assumes the ones before it passed.
+
+| Order | Section | What it covers | Time |
+|---|---|---|---|
+| 1 | **0** Before every test round | Pull, toolchain, build + install, backend, portal, log capture | 15 min |
+| 2 | **B** If the Android build fails | Only if step 1's build fails: which commit to look at | – |
+| 3 | **W** Wi-Fi setup (W.1–W.7) | Phone and a second phone reach the laptop over Wi-Fi | 10 min |
+| 4 | **1** Milestone 2 (2.1–2.16) | rPPG engine, stability gate, QR-carried URL (already passed once; quick re-run of 2.1–2.6 is enough) | 10 min |
+| 5 | **D** Scan speed comparison (D.1–D.5) | Your phone vs your friend's: camera, lighting or thresholds? Send the numbers | 20 min |
+| 6 | **2** Milestone 3 (3.1–3.11) | Face box, one-face rule, embeddings | 10 min |
+| 7 | **3** Milestone 4 (4.1–4.17) | Four screens, consent, random challenge, registration and life certificate from the phone | 20 min |
+| 8 | **5** The 5 demo scenarios (S1–S5 + finale) | The presentation, end to end, with two people | 15 min |
+
+Send the results with section 7 (logs, recordings, the diagnostics numbers from D).
+
+---
+
+## B. If the Android build fails: where to look
+
+The code was written without compiling it. The last build that was **confirmed on the phone** is `c05c79f` (Milestone 2). The later commits that change the Android app, from most to least likely to break the build:
+
+| Look here first | Commit | What it added | Typical error |
+|---|---|---|---|
+| 1 | `4089473` (M3) | LiteRT 1.4.2 dependency, `mobilefacenet.tflite` asset, new C++ `face_core.cpp` + JNI functions (`FaceNative`), CMake change | Dependency resolution (`litert`), duplicate `org.tensorflow.lite` classes, C++ compile errors, `UnsatisfiedLinkError` at runtime (JNI name mismatch) |
+| 2 | `4125eea` (M4) | New Compose screens (`ui/Screens.kt`, `ui/Theme.kt`), `ChallengeVerifier`, `KeyInfo` key level, rewritten `MainActivity` | Kotlin compile errors (an API not in Compose BOM 2023.08.00 / Material3 1.1.1), unresolved reference |
+| 3 | `084af5b` (Step 2) | `CameraTuning.kt` (Camera2Interop fps range, AE/AWB lock), `ScanDiagnostics.kt` | Opt-in or Camera2Interop API errors |
+| 4 | `82bfbd2` (Wi-Fi) | Manifest `networkSecurityConfig`, `res/xml/network_security_config.xml`, `ApiClient` probing | Resource/manifest merge errors |
+
+To pin it down: `git checkout <commit>` and build each of these in turn, oldest first (`82bfbd2` → `084af5b` → `4089473` → `4125eea`); the first one that fails is the culprit. Then `git checkout master` again. Send the error text (section 7.1) and the commit that first fails.
+
 ---
 
 ## 0. Before every test round
@@ -63,6 +95,8 @@ Full instructions: `ANDROID_BUILD.md`, section "Wi-Fi setup". In short:
 The laptop portal is the new Jeevan Suraksha portal (Milestone 7). It shows the phone's live progress and results.
 
 **Before the first scan:** open the portal (`http://<laptop-ip>:5173`), go to **Help & FAQs → Practice scan** (or `/practice`), tick the consent box, click **Start practice scan**, and scan the QR code on screen.
+
+**With the Milestone 4 app** (4.0-challenge): after scanning, a **consent screen** appears; tap **I agree, start the scan**. The three green skin boxes are shown only with **Diagnostics** on (bottom right of the white card), and "Verified" is now **Practice scan passed**. Everything else in this section is unchanged.
 
 | # | Test | Steps | Expected result |
 |---|---|---|---|
@@ -187,8 +221,8 @@ The app now accepts all three QR codes: **Practice scan** (no challenge), **Regi
 | 4.16 | Live portal steps | Watch the laptop during a life-certificate scan. | *Waiting for scan → Measuring pulse → Challenge → Face match → Result* advance live. |
 | 4.17 | Timing | Note the time from "I agree" to the result screen for 3 good scans. | Pulse phase as in section D, plus a few seconds for the challenge. Report the times. |
 
-## 4. Milestones 5–7 (backend and portal; phone used end to end)
-There are no Android code changes in these milestones, so the app doesn't need to be rebuilt unless a note says otherwise. Run section 5 after M7.
+## 4. Milestones 5–7 (backend and portal)
+No phone tests of their own: the backend and portal are tested on the laptop (`pytest`, 73 tests; `scripts/demo_check.py` runs the five scenarios with a simulated phone). The phone exercises them in sections 3 and 5.
 
 ---
 
@@ -200,11 +234,11 @@ Team member **A** is the registered pensioner. Team member **B** is someone else
 
 | # | Scenario | Steps | Expected result on phone | Expected result on portal |
 |---|---|---|---|---|
-| S1 | **Register A** | Officer logs in → Register Pensioner → enter A's dummy details → QR code → A scans and completes the face scan → officer clicks **Approve** | "Registration captured" | A appears in Records as **Active** (green badge). A ledger entry is added. |
-| S2 | **A submits a life certificate** | Submit Life Certificate → enter A's pension ID → QR code → A scans | "Approved" | Stepper completes, then the **certificate card** shows the score and ledger hash, plus a "Certificate issued for 2026" toast. |
-| S3 | **B pretends to be A** | Submit Life Certificate with **A's** pension ID → **B** scans | "Rejected: face does not match" | Red result: **Rejected: face does not match**. It's counted under face mismatch on the Treasury page. |
-| S4 | **Photo of A** | Submit with A's ID → hold a **printed photo** of A up to the phone | "Rejected: no pulse detected" | Red result: **Rejected: no pulse detected**. |
-| S5 | **Video of A** | Submit with A's ID → play a **video** of A on another phone or laptop screen in front of the camera | "Rejected: challenge failed" (and/or "screen replay detected") | Red result with the same reason. |
+| S1 | **Register A** | Officer logs in → Register Pensioner → enter A's dummy details → QR code → A scans, agrees on the consent screen, completes the face scan and the challenge → officer clicks **Approve** | "Face registered" | A appears in Records as **Active** (green badge). A ledger entry is added. |
+| S2 | **A submits a life certificate** | Submit Life Certificate → enter A's pension ID → QR code → A scans | "Life certificate issued" | Stepper completes, then the **certificate card** shows the score and ledger hash, plus a "Certificate issued for 2026" toast. |
+| S3 | **B pretends to be A** | Submit Life Certificate with **A's** pension ID → **B** scans | "Not accepted" + face does not match | Red result: **Rejected: face does not match**. It's counted under face mismatch on the Treasury page. |
+| S4 | **Photo of A** | Submit with A's ID → hold a **printed photo** of A up to the phone | "Not accepted" + no pulse (after about 30 s) | Red result: **Rejected: no pulse detected**. |
+| S5 | **Video of A** | Submit with A's ID → play a **video** of A on another phone or laptop screen in front of the camera | "Not accepted" + challenge failed (or no pulse, if the screen shows no clear pulse) | Red result with the same reason. |
 
 After S1–S5, the **Audit Ledger → Verify chain integrity** button shows green. The Treasury page shows 1 certificate issued and 3 rejections split by reason.
 
@@ -212,7 +246,7 @@ After S1–S5, the **Audit Ledger → Verify chain integrity** button shows gree
 
 **Rehearsing from a clean state:** stop the backend, then run `python scripts/reset_demo.py --yes --seed` in `backend/`, and start it again. The old data is moved to `backend/data/backups/`, not deleted.
 
-**Rehearsing without the phone:** `backend/scripts/simulate_phone.py` runs all five outcomes against the backend and portal, using a software key that shows as SOFTWARE (see `backend/README.md`).
+**Rehearsing without the phone:** `python scripts/demo_check.py` (in `backend/`, backend running) runs S1–S5, the freeze and the restore with a simulated phone and prints ok/FAIL for each; `simulate_phone.py` does single scans (see `backend/README.md`). The presentation itself is in `DEMO_SCRIPT.md`.
 
 Record the score shown for S2 and S3 (for threshold calibration).
 

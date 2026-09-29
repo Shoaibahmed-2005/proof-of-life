@@ -2,7 +2,7 @@
 
 ## ▶ RESUME HERE (for a new agent or chat)
 
-**Status (2026-09-30):** M5, M2 and M6 are done and pushed. The user then asked for **all remaining work in one go, without stopping between milestones** (the teammate tests everything on the phone at the end). There is one commit + push per step, and this section is updated after each one.
+**Status (2026-09-30): all milestones (M2–M8) are built and pushed.** The remaining work is the teammate's phone test round (`TESTING_CHECKLIST.md`, "One combined test run"), then calibrating the thresholds from those measurements, then fixing whatever that round finds. The Android code (commits 82bfbd2, 084af5b, 4089473, 4125eea) has **not been compiled yet**. If the build fails, see `TESTING_CHECKLIST.md` section B.
 
 **Current plan (tick = committed and pushed):**
 - [x] **1. Wi-Fi fix.** `backend/run.py` (0.0.0.0), adapter-aware QR address (`app/core/network.py`), startup banner + LAN self-check, LAN CORS, `vite --host`, a network security config, app error reasons, and Wi-Fi setup docs.
@@ -10,14 +10,14 @@
 - [x] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
 - [x] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
 - [x] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
-- [ ] **6. M8:** docs, `DEMO_SCRIPT.md`, end-to-end run with the simulator, and one combined `TESTING_CHECKLIST.md`.
+- [x] **6. M8:** docs, `DEMO_SCRIPT.md`, end-to-end run with the simulator (`backend/scripts/demo_check.py`: all checks pass), and one combined `TESTING_CHECKLIST.md`.
 
 **Final deliverable to the user:** one summary covering what was built, what was verified here, the combined test list, which commit to check first if the Android build fails, and how to read the diagnostics (camera vs lighting vs thresholds). The user said: don't lower `MIN_SNR_DB` without real measurements.
 
 **Read first:**
 - `build-prompt.md` (the brief) and `DESIGN.md` (the visual rules). Re-read the relevant sections before each milestone.
 - §11 below (the change log: what each milestone built).
-- `.graphify/GRAPH_REPORT.md` (backend map, regenerated after M6). It covers `backend/` only.
+- `.graphify/GRAPH_REPORT.md` (backend map, regenerated after M8). It covers `backend/` only.
 
 **Working rules the user set:**
 - (Current run) Don't stop between steps. Commit + push per step, and update this section after each commit.
@@ -28,7 +28,7 @@
 
 **How to run and test:**
 - **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (72 tests). Serve with `python run.py` (0.0.0.0:8000; prints the phone address). The demo officer is `officer` / `officer123`.
-- **Without a phone:** `backend/scripts/simulate_phone.py --qr '<qr json>' --person A` (options: `--no-pulse`, `--challenge-fail`, `--person B`, `--similarity 0.6`).
+- **Without a phone:** `backend/scripts/simulate_phone.py --qr '<qr json>' --person A` (options: `--no-pulse`, `--challenge-fail`, `--multiple-faces`, `--person B`, `--similarity 0.6`). With the backend running, `backend/scripts/demo_check.py` runs all five demo scenarios.
 - **Clean demo:** `backend/scripts/reset_demo.py --yes --seed`.
 - **Portal:** `npm run dev` (http://localhost:5173) and `npx vite build`.
 - **Browser preview:** `.claude/launch.json` has `backend` and `portal` configs.
@@ -578,3 +578,27 @@ The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). Rea
   - New test (73 total).
   - The portal maps FACE_NOT_CAPTURED to the Face step.
 - App version 4.0-challenge (versionCode 5).
+
+### M8: Docs, demo script, end-to-end run (2026-09-30)
+- **`DEMO_SCRIPT.md`** (new): the 10-minute presentation. It covers:
+  - the cast and props, and why everything uses one phone;
+  - a 30-minute pre-flight checklist;
+  - word-for-word talking points for S1–S5, the freeze/restore finale, the ledger and treasury;
+  - a "what to do if…" table (including falling back to the simulator via "Show QR data");
+  - likely judge questions.
+- **`backend/scripts/demo_check.py`** (new): runs against a live backend and checks each result.
+  - It covers S1–S5, the freeze after 3 failures, Review Queue → restore, ledger verification, the treasury and a MULTIPLE_FACES abort.
+  - It uses a fresh test pensioner and a fresh simulated device.
+  - Run on this laptop: **all checks pass**.
+  - The portal was also checked live with the simulator: the stepper went through Measuring → Challenge ("Turn your head left") → Face match → Result, and the certificate card appeared.
+- **`simulate_phone.py`** now behaves like the M4 app: stable_reading, challenge_issued, then challenge_passed/failed telemetry; `--multiple-faces`; frames_used 15/5.
+- **Docs:**
+  - `backend/EXPLAINER.md` rewritten for the pension system (it still described the old netbanking login), including an honest "what it does not do" section.
+  - `backend/README.md`: structure (network, diagnostics, run.py, demo_check), the app-abort step, new reason codes, more limitations.
+  - `ANDROID_BUILD.md`: the app's four screens and flow, log tags, unit-test command.
+  - `TESTING_CHECKLIST.md`:
+    - a **combined run order** at the top (setup → Wi-Fi → M2 → scan-speed comparison → M3 → M4 → demo scenarios);
+    - new **section B** (which commit to check if the Android build fails);
+    - demo expectations updated to the new app's wording.
+- The Graphify backend map was regenerated (639 nodes, 28 communities) and copied to `.graphify/`.
+- The dev DB was reset with seed data (the old data is in `backend/data/backups/`).

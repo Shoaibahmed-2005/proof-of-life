@@ -21,6 +21,7 @@ backend/
 │   ├── core/
 │   │   ├── config.py              # Settings from .env (thresholds, keys, URLs)
 │   │   ├── deps.py                # DB session + officer-auth dependencies
+│   │   ├── network.py             # LAN address for QR codes, startup self-check
 │   │   └── security.py            # Password hashing, officer tokens, Fernet template cipher
 │   ├── db/
 │   │   ├── database.py            # Engine (SQLite by default), init_db, get_db
@@ -33,6 +34,7 @@ backend/
 │   │   ├── pensioners.py          # Registration details, records, public status lookup
 │   │   ├── enroll.py              # Officer approves a captured registration
 │   │   ├── reviews.py             # Review queue: borderline certificates, frozen pensions
+│   │   ├── diagnostics.py         # Per-scan app diagnostics (officer; JSON and CSV)
 │   │   └── ledger.py              # Ledger, credentials, treasury
 │   ├── schemas/                   # auth.py (signed payload), session.py, pensioner.py, health.py
 │   └── services/
@@ -52,9 +54,11 @@ backend/
 ├── scripts/
 │   ├── calibrate_thresholds.py    # Label genuine/impostor scores → suggest thresholds
 │   ├── simulate_phone.py          # Dev tool: acts as the phone (software key)
+│   ├── demo_check.py              # Runs the 5 demo scenarios end to end against a running backend
 │   ├── seed_demo.py               # Fictional demo pensioners
 │   └── reset_demo.py              # Clean state for rehearsals (backs up, never deletes)
-├── tests/                         # pytest suite (pipeline, face match, scripts)
+├── run.py                         # Start the server on 0.0.0.0:8000 (phones on the Wi-Fi can reach it)
+├── tests/                         # pytest suite (pipeline, face match, ledger/DID, network, diagnostics, scripts)
 ├── data/                          # (gitignored) SQLite DB, dev keys, score log
 ├── .env.example  requirements.txt  requirements-dev.txt
 ```
@@ -118,7 +122,7 @@ All paths are under `/api/v1`. 🔒 = officer token required (`Authorization: Be
 | `ACCESS_GRANTED` | Server → Portal | Legacy AUTH flow succeeded |
 | `STATUS` / `pong` | Server → Client | Replies to `status` / `ping` |
 
-Rejection reason codes: `NO_PULSE`, `CHALLENGE_FAILED`, `CHALLENGE_MISMATCH`, `FACE_MISMATCH`, `DEVICE_MISMATCH`, `DEVICE_NOT_REGISTERED`, `CONSENT_MISSING`, `STALE_PAYLOAD`, `MODEL_MISMATCH`, `INVALID_EMBEDDING`, `INVALID_TEMPLATE`, `ALREADY_REGISTERED`, `SESSION_EXPIRED`, `SESSION_ALREADY_USED`, `NONCE_MISMATCH`, `PURPOSE_MISMATCH`, `INVALID_SIGNATURE`, `INVALID_PAYLOAD`, `INTERNAL_ERROR`.
+Rejection reason codes: `NO_PULSE`, `CHALLENGE_FAILED`, `MULTIPLE_FACES`, `FACE_NOT_CAPTURED`, `CHALLENGE_MISMATCH`, `FACE_MISMATCH`, `DEVICE_MISMATCH`, `DEVICE_NOT_REGISTERED`, `CONSENT_MISSING`, `STALE_PAYLOAD`, `MODEL_MISMATCH`, `INVALID_EMBEDDING`, `INVALID_TEMPLATE`, `ALREADY_REGISTERED`, `SESSION_EXPIRED`, `SESSION_ALREADY_USED`, `NONCE_MISMATCH`, `PURPOSE_MISMATCH`, `INVALID_SIGNATURE`, `INVALID_PAYLOAD`, `INTERNAL_ERROR`.
 
 ## Verification pipeline (`POST /auth/verify`)
 
@@ -129,6 +133,7 @@ Fail fast, in this order (details in `app/services/verification.py`):
 3. Session exists, purpose matches, nonce matches, not expired, then **claimed atomically** (one use).
 4. Device binding: LIFE_CERTIFICATE must use the key registered for that pensioner; ENROLLMENT registers the key (activated when the officer approves).
 5. Timestamp freshness (±`TIMESTAMP_MAX_SKEW_SECONDS`) and consent recorded.
+5b. The app's own abort (`abort_reason`): `MULTIPLE_FACES` (a second face appeared) or `FACE_NOT_CAPTURED` (too few clear face frames). Neither counts toward freezing.
 6. Liveness: BPM range, SNR ≥ `MIN_SNR_DB`, `liveness_passed`.
 7. Challenge matches the one issued and was passed.
 8. Face match (LIFE_CERTIFICATE): 1:1 cosine against this pensioner's `current_template` **and** `anchor_template`.
@@ -156,7 +161,7 @@ python run.py                        # add --reload while developing
 - Optional fictional demo data: `python scripts/seed_demo.py`
 - Rehearse from a clean state: stop the backend, then `python scripts/reset_demo.py --yes` (add `--seed` for the demo pensioners). The old database is moved to `data/backups/`.
 
-`--host 0.0.0.0` lets a phone on the same Wi-Fi reach the laptop. The QR code carries the laptop's LAN IP automatically, or `PUBLIC_BASE_URL` if set (e.g. a `cloudflared` tunnel URL). Over USB, `adb reverse tcp:8000 tcp:8000` also works.
+`run.py` listens on `0.0.0.0`, so a phone on the same Wi-Fi can reach the laptop (plain `uvicorn app.main:app` would be localhost-only). The QR code carries the laptop's LAN IP automatically, or `PUBLIC_BASE_URL` if set (e.g. a `cloudflared` tunnel URL). Over USB, `adb reverse tcp:8000 tcp:8000` also works.
 
 ## Testing
 
@@ -167,7 +172,9 @@ cd backend
 
 The suite simulates the phone (software P-256 key signing the same way the app does) and synthetic face embeddings, and covers every pipeline branch, the three bands, template drift, freezing, the review queue, the ledger and WebSockets.
 
-**Without a phone:** `scripts/simulate_phone.py --qr '<qr json>' --person A` acts as the app (add `--person B`, `--no-pulse`, `--challenge-fail` or `--similarity 0.6` for the other outcomes). It signs with a software key and reports `SOFTWARE`, so it's never mistaken for the real device.
+**Without a phone:** `scripts/simulate_phone.py --qr '<qr json>' --person A` acts as the app, including its live steps (pulse, challenge issued/passed). Add `--person B`, `--no-pulse`, `--challenge-fail`, `--multiple-faces` or `--similarity 0.6` for the other outcomes. It signs with a software key and reports `SOFTWARE`, so it's never mistaken for the real device.
+
+**All five demo scenarios at once:** with the backend running, `python scripts/demo_check.py` registers a fresh test pensioner and runs S1–S5, the freeze, the officer restore, the ledger check and the treasury, and prints ok/FAIL for each (`--slow` to watch it on the portal).
 
 ## Calibrating thresholds
 
@@ -215,4 +222,8 @@ python scripts/calibrate_thresholds.py report                         # suggests
 - The key security level (StrongBox/TEE) is reported by the app; verifying the Android key attestation chain against Google's root is future work.
 - The ledger is a local hash chain, designed to be anchored on a real blockchain; anchoring isn't implemented yet.
 - Credentials use a simple documented proof format (ECDSA P-256 over canonical JSON), not a full W3C Data Integrity cryptosuite.
+- Screen-replay detection (moiré, screen borders, glare) is not implemented. Recorded video is stopped by the random challenge; a live deepfake that follows the prompt is out of scope.
+- The rPPG and face thresholds are placeholders until calibrated on the team's own scans (`calibrate_thresholds.py`, and the `scans` report for `MIN_SNR_DB`).
+- The face model's source does not document its training data (`../MODEL_INFO.md`).
+- On Android 11 and older, the app can only tell "secure hardware" from "software", so a StrongBox key is reported as TEE there (never overstated).
 - Repeated failed attempts freeze a pension by design, so someone who knows a pension ID and has the registered phone could trigger a freeze; an officer can restore it through the review queue.
