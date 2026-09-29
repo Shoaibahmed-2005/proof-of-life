@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # Minimum rPPG SNR in dB for LIFE_CERTIFICATE / ENROLLMENT payloads.
     # PLACEHOLDER — calibrate from phone logs (TESTING_CHECKLIST.md, M2 tests 2.5/2.8).
     MIN_SNR_DB: float = 3.0
+    # The app's stability gate (sent in the QR code, so tuning needs no app rebuild).
+    # Change these only from measured data (scan diagnostics; see
+    # scripts/calibrate_thresholds.py scans).
+    RPPG_WINDOW_SEC: float = 10.0
+    RPPG_STABLE_COUNT: int = 5
+    RPPG_STABLE_TOLERANCE_BPM: float = 3.0
+    RPPG_SCAN_TIMEOUT_SEC: float = 30.0
     # Legacy AUTH flow (pre-milestone app): linear peak ratio, kept unchanged.
     LEGACY_MIN_SNR: float = 3.5
 

@@ -32,7 +32,7 @@ from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.db.models import (
-    AuthSession, BiometricTemplate, CertificateStatus, Device, KeyType,
+    AuthSession, ScanDiagnostic, BiometricTemplate, CertificateStatus, Device, KeyType,
     LifeCertificate, Pensioner, PensionerStatus, SessionPurpose, SessionStatus,
 )
 from app.db.types import utcnow
@@ -108,6 +108,35 @@ def verify(db: Session, request: VerifyRequest) -> VerificationResult:
         logger.warning("Payload decode failed: %s", e)
         return _denied("unknown", "INVALID_PAYLOAD", f"Invalid payload format: {e}")
 
+    result = _verify_parsed(db, request, payload)
+    _store_diagnostics(db, payload, result)
+    return result
+
+
+def _store_diagnostics(db: Session, payload: BiometricPayload, result: VerificationResult) -> None:
+    """Keeps the app's scan measurements with the outcome (never blocks verification)."""
+    try:
+        d = payload.diagnostics
+        session = db.get(AuthSession, payload.session_id)
+        row = ScanDiagnostic(
+            session_id=payload.session_id,
+            purpose=payload.purpose.value,
+            pensioner_id=session.pensioner_id if session else None,
+            outcome=result.response.outcome or result.response.status,
+            reason_code=result.response.reason_code,
+            liveness_passed=payload.liveness_passed,
+            bpm=payload.bpm, snr_db=payload.snr, app_version=payload.app_version,
+            key_type=payload.key_security_level.value if payload.key_security_level else None,
+            **(d.model_dump() if d else {}),
+        )
+        db.add(row)
+        db.commit()
+    except Exception:  # diagnostics must never break the verification response
+        logger.exception("Could not store scan diagnostics")
+        db.rollback()
+
+
+def _verify_parsed(db: Session, request: VerifyRequest, payload: BiometricPayload) -> VerificationResult:
     sid = payload.session_id
 
     # Step 3: session checks, then claim (single use).

@@ -167,6 +167,46 @@ class AuthSession(SQLModel, table=True):
     completed_at: Optional[datetime] = Field(default=None, sa_column=_ts(nullable=True))
 
 
+class ScanDiagnostic(SQLModel, table=True):
+    """One row per signed scan result (pass or fail) with the app's measurements.
+    Used to tell a slow camera from poor lighting or tight thresholds."""
+
+    __tablename__ = "scan_diagnostics"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow, sa_column=_ts())
+    session_id: str = Field(index=True)
+    purpose: Optional[str] = None
+    pensioner_id: Optional[int] = Field(default=None, index=True)
+    outcome: Optional[str] = None          # GRANTED / ISSUED / UNDER_REVIEW / CAPTURED / REJECTED
+    reason_code: Optional[str] = None
+    liveness_passed: Optional[bool] = None
+    bpm: Optional[float] = None
+    snr_db: Optional[float] = None
+    app_version: Optional[str] = None
+    key_type: Optional[str] = None
+    device_model: Optional[str] = Field(default=None, index=True)
+    scan_seconds: Optional[float] = None
+    avg_fps: Optional[float] = None
+    min_fps: Optional[float] = None
+    frames: Optional[int] = None
+    face_lost_count: Optional[int] = None
+    best_snr_db: Optional[float] = None
+    final_spread_bpm: Optional[float] = None
+    mean_luma: Optional[float] = None
+    skin_fraction: Optional[float] = None
+    estimates: Optional[int] = None
+    min_snr_db: Optional[float] = None
+    gate_sec_window: Optional[float] = None
+    gate_sec_stable: Optional[float] = None
+    gate_sec_snr: Optional[float] = None
+    gate_sec_face: Optional[float] = None
+    last_gate: Optional[str] = None
+    ae_locked: Optional[bool] = None
+    fps_range: Optional[str] = None
+    label: Optional[str] = None            # set by calibrate_thresholds.py (genuine / photo / ...)
+
+
 class LedgerEntry(SQLModel, table=True):
     """Append-only, hash-chained audit log. Holds hashes only — never personal data."""
 

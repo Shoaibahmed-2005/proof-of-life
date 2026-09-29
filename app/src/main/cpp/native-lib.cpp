@@ -12,7 +12,10 @@
 //   [6] new estimate this frame (0/1)      [7] estimates since reset
 //   [8] samples in window                  [9] frame had usable face pixels (0/1)
 //   [10] skin fraction                     [11] pixels used
-//   [12...] waveform (band-passed pulse, scaled to [-1, 1])
+//   [12] BPM spread of recent estimates     [13] minimum SNR in use (dB)
+//   [14] face brightness (luma 0-255)       [15] window-full gate (0/1)
+//   [16] readings-agree gate (0/1)          [17] SNR gate (0/1)
+//   [18...] waveform (band-passed pulse, scaled to [-1, 1])
 
 #include <jni.h>
 #include <android/log.h>
@@ -27,7 +30,7 @@
 
 namespace {
 
-constexpr int kHeaderSize = 12;
+constexpr int kHeaderSize = 18;
 constexpr int kMaxRois = 8;
 
 std::mutex g_lock;
@@ -108,9 +111,11 @@ Java_com_example_sentinelhard_rppg_RppgNative_nativeProcessFrame(
     const rppg::Status s = g_engine.update();
 
     if (s.newEstimate) {
-        LOGI("estimate #%d: bpm=%.1f (latest %.1f) snr=%.1f dB (median %.1f) fill=%.2f stable=%d skin=%.2f px=%d",
-             s.estimateCount, s.bpm, s.latestBpm, s.snrDb, s.medianSnrDb, s.windowFill, s.stable ? 1 : 0,
-             mean.skinFraction, mean.pixels);
+        LOGI("estimate #%d: bpm=%.1f (latest %.1f, spread %.1f) snr=%.1f dB (median %.1f) fill=%.2f "
+             "gates[window=%d agree=%d snr=%d] stable=%d skin=%.2f luma=%.0f px=%d",
+             s.estimateCount, s.bpm, s.latestBpm, s.spreadBpm, s.snrDb, s.medianSnrDb, s.windowFill,
+             s.windowOk ? 1 : 0, s.agreeOk ? 1 : 0, s.snrOk ? 1 : 0, s.stable ? 1 : 0,
+             mean.skinFraction, mean.luma, mean.pixels);
     }
 
     std::vector<double> out = {
@@ -118,8 +123,10 @@ Java_com_example_sentinelhard_rppg_RppgNative_nativeProcessFrame(
         s.stable ? 1.0 : 0.0, s.newEstimate ? 1.0 : 0.0,
         static_cast<double>(s.estimateCount), static_cast<double>(s.samplesInWindow),
         mean.valid ? 1.0 : 0.0, mean.skinFraction, static_cast<double>(mean.pixels),
+        s.spreadBpm, g_engine.config().minSnrDb, mean.luma,
+        s.windowOk ? 1.0 : 0.0, s.agreeOk ? 1.0 : 0.0, s.snrOk ? 1.0 : 0.0,
     };
-    static_assert(kHeaderSize == 12, "keep in sync with RppgResult.HEADER_SIZE");
+    static_assert(kHeaderSize == 18, "keep in sync with RppgResult.HEADER_SIZE");
     const std::vector<double>& wave = g_engine.waveform();
     out.insert(out.end(), wave.begin(), wave.end());
     return toJava(env, out);

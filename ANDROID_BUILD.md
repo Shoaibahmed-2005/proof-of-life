@@ -96,7 +96,7 @@ Remove them after the event: `netsh advfirewall firewall delete rule name="Jeeva
 ## 4. Logs
 
 ```powershell
-adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelTelemetry:V TelemetryStreamer:V AndroidRuntime:E *:S
+adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelDiag:V SentinelTelemetry:V TelemetryStreamer:V AndroidRuntime:E *:S
 ```
 
 `SentinelHardNative` prints every estimate (BPM, SNR, window fill, stable, skin fraction), which is what threshold calibration needs.

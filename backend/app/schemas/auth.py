@@ -10,6 +10,29 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.db.models import KeyType, SessionPurpose
 
 
+class ScanDiagnostics(BaseModel):
+    """Per-scan measurements from the app (Milestone 2 diagnostics). All optional."""
+    scan_seconds: Optional[float] = None
+    avg_fps: Optional[float] = None
+    min_fps: Optional[float] = None
+    frames: Optional[int] = None
+    face_lost_count: Optional[int] = None
+    best_snr_db: Optional[float] = None
+    final_spread_bpm: Optional[float] = None
+    mean_luma: Optional[float] = None
+    skin_fraction: Optional[float] = None
+    estimates: Optional[int] = None
+    min_snr_db: Optional[float] = None
+    gate_sec_window: Optional[float] = None
+    gate_sec_stable: Optional[float] = None
+    gate_sec_snr: Optional[float] = None
+    gate_sec_face: Optional[float] = None
+    last_gate: Optional[str] = Field(default=None, max_length=40)
+    ae_locked: Optional[bool] = None
+    fps_range: Optional[str] = Field(default=None, max_length=40)
+    device_model: Optional[str] = Field(default=None, max_length=80)
+
+
 class BiometricPayload(BaseModel):
     """
     The JSON the phone builds and signs inside Titan M2 (StrongBox).
@@ -41,6 +64,7 @@ class BiometricPayload(BaseModel):
     model_version: Optional[str] = None
     key_security_level: Optional[KeyType] = None
     consent: Optional[bool] = None
+    diagnostics: Optional[ScanDiagnostics] = None
 
     @field_validator("timestamp")
     @classmethod

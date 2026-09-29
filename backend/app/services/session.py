@@ -73,7 +73,13 @@ def build_qr_payload(session: AuthSession, base_url: str) -> dict:
         }
     # The app's stability gate uses the same minimum as the backend check,
     # so MIN_SNR_DB can be calibrated in .env without rebuilding the app.
-    payload["liveness"] = {"min_snr_db": settings.MIN_SNR_DB}
+    payload["liveness"] = {
+        "min_snr_db": settings.MIN_SNR_DB,
+        "window_s": settings.RPPG_WINDOW_SEC,
+        "stable_count": settings.RPPG_STABLE_COUNT,
+        "stable_tolerance_bpm": settings.RPPG_STABLE_TOLERANCE_BPM,
+        "timeout_s": settings.RPPG_SCAN_TIMEOUT_SEC,
+    }
     return payload
 
 

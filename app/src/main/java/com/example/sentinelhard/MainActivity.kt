@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -23,6 +24,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,15 +65,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.example.sentinelhard.camera.CameraTuning
 import com.example.sentinelhard.camera.QrCodeAnalyzer
 import com.example.sentinelhard.models.BiometricPayload
+import com.example.sentinelhard.models.ScanDiagnosticsPayload
 import com.example.sentinelhard.models.VerifyRequest
 import com.example.sentinelhard.network.ApiClient
 import com.example.sentinelhard.network.QrPayload
 import com.example.sentinelhard.rppg.FaceRois
+import com.example.sentinelhard.rppg.GateSettings
 import com.example.sentinelhard.rppg.RppgConfig
 import com.example.sentinelhard.rppg.RppgNative
 import com.example.sentinelhard.rppg.RppgResult
+import com.example.sentinelhard.rppg.ScanDiagnostics
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -115,6 +121,9 @@ class MainActivity : AppCompatActivity() {
     private val faceVisibleState = mutableStateOf(false)
     private val roiOverlayState = mutableStateOf<List<RectF>>(emptyList())
     private val overlayImageSize = mutableStateOf(AndroidSize(0, 0))  // upright analysis image size
+    private val showDiagnostics = mutableStateOf(false)                  // off by default for the demo
+    private val diagSnapshotState = mutableStateOf<ScanDiagnostics.Snapshot?>(null)
+    private val guidanceState = mutableStateOf<String?>(null)
 
     // ── Measurement state (camera thread + ML Kit callbacks) ────────────
     @Volatile private var currentRois: IntArray? = null
@@ -123,6 +132,14 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var isDetectingFace = false
     private val submitted = AtomicBoolean(false)
     private var frameCounter = 0
+    private val diagnostics = ScanDiagnostics()
+    @Volatile private var gates = GateSettings(RppgConfig.DEFAULT_MIN_SNR_DB, RppgConfig.WINDOW_SEC,
+        RppgConfig.STABLE_COUNT, RppgConfig.STABLE_TOLERANCE_BPM, RppgConfig.SCAN_TIMEOUT_SEC)
+    @Volatile private var boundCamera: Camera? = null
+    @Volatile private var aeLockRequested = false
+    @Volatile private var faceWidthFraction = 1.0
+    @Volatile private var faceMoving = false
+    private var lastFaceCenter: Pair<Float, Float>? = null
 
     private val cryptoManager = CryptoManager()
     private val cameraExecutor = Executors.newSingleThreadExecutor()
@@ -234,12 +251,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun startMeasuring(qr: QrPayload, baseUrl: String) {
         resetMeasurement()
-        RppgNative.nativeConfigure(
-            qr.minSnrDb ?: RppgConfig.DEFAULT_MIN_SNR_DB,
-            RppgConfig.WINDOW_SEC,
-            RppgConfig.STABLE_COUNT,
-            RppgConfig.STABLE_TOLERANCE_BPM,
-        )
+        gates = GateSettings.from(qr)
+        Log.i(ScanDiagnostics.TAG, "Gates: min_snr=${gates.minSnrDb} dB window=${gates.windowSec}s " +
+            "stable=${gates.stableCount} within +/-${gates.stableToleranceBpm} BPM timeout=${gates.timeoutSec}s")
+        RppgNative.nativeConfigure(gates.minSnrDb, gates.windowSec, gates.stableCount, gates.stableToleranceBpm)
         telemetryStreamer.connect(baseUrl, qr.sessionId, qr.nonce)
         telemetryStreamer.send("scan_started")
         scanState.value = ScanState.Measuring(qr, baseUrl)
@@ -256,6 +271,13 @@ class MainActivity : AppCompatActivity() {
         rppgState.value = RppgResult.EMPTY
         faceVisibleState.value = false
         roiOverlayState.value = emptyList()
+        diagnostics.reset()
+        diagSnapshotState.value = null
+        guidanceState.value = null
+        aeLockRequested = false
+        faceWidthFraction = 1.0
+        faceMoving = false
+        lastFaceCenter = null
     }
 
     private fun finishScan(result: ScanState.Result) {
@@ -310,18 +332,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindFaceCamera(provider: ProcessCameraProvider, previewView: PreviewView, owner: LifecycleOwner) {
-        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-        val analysis = ImageAnalysis.Builder()
+        val previewBuilder = Preview.Builder()
+        val analysisBuilder = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setResolutionSelector(resolution(640, 480))
-            .build()
+        // A steady frame rate matters for rPPG: ask for a fixed 30 fps if the camera offers it.
+        val ranges = CameraTuning.frontFpsRanges(this)
+        val range = CameraTuning.chooseFpsRange(ranges, RppgConfig.TARGET_FPS)
+        diagnostics.supportedFpsRanges = ranges.joinToString(" ") { "[${it.lower},${it.upper}]" }
+        diagnostics.fpsRange = range?.let { "[${it.lower},${it.upper}]" } ?: "default"
+        if (range != null) {
+            CameraTuning.applyFpsRange(previewBuilder, range)
+            CameraTuning.applyFpsRange(analysisBuilder, range)
+        }
+        Log.i(ScanDiagnostics.TAG, "Camera fps ranges: ${diagnostics.supportedFpsRanges} -> using ${diagnostics.fpsRange}")
+        val preview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        val analysis = analysisBuilder.build()
         analysis.setAnalyzer(cameraExecutor) { image -> analyzeFrame(image) }
         try {
             provider.unbindAll()
-            provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
+            boundCamera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
         } catch (e: Exception) {
             Log.e(TAG, "Face camera binding failed", e)
         }
+    }
+
+    /** Once the face is lit correctly, freeze exposure and white balance, then restart the window. */
+    private fun maybeLockExposure(t: Double) {
+        val started = firstFaceSec ?: return
+        val camera = boundCamera ?: return
+        if (aeLockRequested || t - started < RppgConfig.AE_SETTLE_SEC) return
+        aeLockRequested = true
+        CameraTuning.lockExposure(this, camera) { ok ->
+            diagnostics.aeLocked = ok
+            Log.i(ScanDiagnostics.TAG, "Exposure/white-balance lock: ${if (ok) "locked" else "not supported"}")
+            if (ok && !submitted.get()) {
+                // Samples from before the lock contain exposure changes: start the window afresh.
+                RppgNative.nativeReset()
+                firstFaceSec = lastFaceSeenSec
+            }
+        }
+    }
+
+    /** Plain-language hint when conditions make the pulse hard to measure. */
+    private fun guidanceFor(r: RppgResult, faceVisible: Boolean): String? = when {
+        !faceVisible -> "Face the camera"
+        faceWidthFraction < RppgConfig.FACE_MIN_WIDTH_FRACTION -> "Move closer"
+        r.faceSampleValid && r.luma < RppgConfig.LUMA_TOO_DARK -> "Move to brighter light"
+        r.faceSampleValid && r.luma > RppgConfig.LUMA_TOO_BRIGHT -> "Too bright: avoid direct light on your face"
+        faceMoving -> "Hold still"
+        else -> null
     }
 
     private fun resolution(w: Int, h: Int): ResolutionSelector = ResolutionSelector.Builder()
@@ -339,6 +399,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val t = imageProxy.imageInfo.timestamp / 1_000_000_000.0
+        diagnostics.onFrame(t)
         val rotation = imageProxy.imageInfo.rotationDegrees
         val width = imageProxy.width
         val height = imageProxy.height
@@ -357,7 +418,13 @@ class MainActivity : AppCompatActivity() {
                     planes[1].rowStride, planes[1].pixelStride,
                     rois, t,
                 )
-                onRppgResult(RppgResult.fromArray(raw), t, state)
+                val result = RppgResult.fromArray(raw)
+                diagnostics.onResult(result, t, faceVisibleState.value)
+                if (result.newEstimate || frameCounter % 5 == 0) {
+                    diagSnapshotState.value = diagnostics.snapshot
+                    guidanceState.value = guidanceFor(result, faceVisibleState.value)
+                }
+                onRppgResult(result, t, state)
             }
         }
 
@@ -377,6 +444,16 @@ class MainActivity : AppCompatActivity() {
                     lastFaceSeenSec = t
                     if (firstFaceSec == null) firstFaceSec = t
                     faceVisibleState.value = true
+                    val uprightWidth = if (rotation == 90 || rotation == 270) height else width
+                    val box = face.boundingBox
+                    faceWidthFraction = box.width().toDouble() / uprightWidth
+                    val center = Pair(box.exactCenterX(), box.exactCenterY())
+                    lastFaceCenter?.let { prev ->
+                        val jump = Math.hypot((center.first - prev.first).toDouble(), (center.second - prev.second).toDouble())
+                        faceMoving = jump / box.width() > RppgConfig.MOTION_MAX_FRACTION
+                    }
+                    lastFaceCenter = center
+                    maybeLockExposure(t)
                     roiOverlayState.value = FaceRois.uprightRois(face.boundingBox)
                     overlayImageSize.value = if (rotation == 90 || rotation == 270) {
                         AndroidSize(height, width)
@@ -403,6 +480,8 @@ class MainActivity : AppCompatActivity() {
         roiOverlayState.value = emptyList()
         faceVisibleState.value = false
         telemetryStreamer.send("face_lost")
+        diagnostics.onFaceLost()
+        guidanceState.value = "Face the camera"
     }
 
     private fun onRppgResult(result: RppgResult, t: Double, state: ScanState.Measuring) {
@@ -422,8 +501,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val started = firstFaceSec
-        if (started != null && t - started > RppgConfig.SCAN_TIMEOUT_SEC && submitted.compareAndSet(false, true)) {
-            Log.w(TAG_DSP, "No stable pulse within ${RppgConfig.SCAN_TIMEOUT_SEC}s (last SNR %.1f dB) → reporting no pulse"
+        if (started != null && t - started > gates.timeoutSec && submitted.compareAndSet(false, true)) {
+            Log.w(TAG_DSP, "No stable pulse within ${gates.timeoutSec}s (last SNR %.1f dB) → reporting no pulse"
                 .format(result.medianSnrDb))
             runOnUiThread { submitResult(state, result, livenessPassed = false) }
         }
@@ -435,7 +514,8 @@ class MainActivity : AppCompatActivity() {
         scanState.value = ScanState.Submitting
         lifecycleScope.launch {
             try {
-                val request = withContext(Dispatchers.Default) { buildSignedRequest(state.qr, result, livenessPassed) }
+                val diag = diagnostics.summary(if (livenessPassed) "stable" else "timeout", result)
+                val request = withContext(Dispatchers.Default) { buildSignedRequest(state.qr, result, livenessPassed, diag) }
                 val response = ApiClient.service(state.baseUrl).verifyBiometrics(request)
                 val body = response.body()
                 val outcome = when {
@@ -455,7 +535,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildSignedRequest(qr: QrPayload, result: RppgResult, livenessPassed: Boolean): VerifyRequest {
+    private fun buildSignedRequest(
+        qr: QrPayload, result: RppgResult, livenessPassed: Boolean, diag: ScanDiagnosticsPayload,
+    ): VerifyRequest {
         val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }.format(Date())
@@ -470,6 +552,7 @@ class MainActivity : AppCompatActivity() {
             livenessPassed = livenessPassed,
             framesUsed = result.samplesInWindow,
             appVersion = BuildConfig.VERSION_NAME,
+            diagnostics = diag,
         )
         val payloadJson = Json.encodeToString(BiometricPayload.serializer(), payload)
         if (!cryptoManager.hasKey()) cryptoManager.generateHardwareKey()
@@ -557,9 +640,13 @@ class MainActivity : AppCompatActivity() {
     private fun MeasuringHud() {
         val r by rppgState
         val faceVisible by faceVisibleState
+        val guidance by guidanceState
+        val showDiag by showDiagnostics
+        val snap by diagSnapshotState
         val prompt = when {
-            !faceVisible && !r.hasEstimate -> "Position your face in the frame"
             r.stable -> "Pulse steady ✓"
+            guidance != null -> guidance!!
+            !faceVisible && !r.hasEstimate -> "Position your face in the frame"
             r.hasEstimate -> "Measuring… hold still"
             else -> "Measuring…"
         }
@@ -587,6 +674,38 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             PulseWaveform(r.waveform, Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp))
+            // Small diagnostics toggle (off by default so the demo screen stays clean).
+            Text(
+                if (showDiag) "Hide diagnostics" else "Diagnostics",
+                color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable { showDiagnostics.value = !showDiag }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+            val sn = snap
+            if (showDiag && sn != null) {
+                Column(
+                    modifier = Modifier.align(Alignment.CenterStart).padding(12.dp)
+                        .background(Color.Black.copy(alpha = 0.6f)).padding(10.dp),
+                ) {
+                    DiagLine("time", "%.1f s".format(sn.elapsedSec))
+                    DiagLine("camera", "%.1f fps %s".format(sn.fps, sn.fpsRange))
+                    DiagLine("pulse", "%.1f BPM (spread %.1f)".format(sn.bpm, sn.spreadBpm))
+                    DiagLine("SNR", "%.1f dB (min %.1f)".format(sn.snrDb, sn.minSnrDb))
+                    DiagLine("light", "%.0f / 255".format(sn.luma))
+                    DiagLine("AE lock", if (sn.aeLocked) "yes" else "no")
+                    DiagLine("waiting for", sn.gate.label)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun DiagLine(label: String, value: String) {
+        Row {
+            Text("$label: ", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
+            Text(value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 

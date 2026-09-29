@@ -93,6 +93,15 @@ def build_request(qr: dict, args) -> dict:
         "model_version": settings.FACE_MODEL_VERSION,
         "key_security_level": "SOFTWARE",
         "consent": True,
+        "diagnostics": {
+            "scan_seconds": 30.0 if args.no_pulse else 11.2, "avg_fps": 30.0, "frames": 336,
+            "face_lost_count": 0, "best_snr_db": 1.0 if args.no_pulse else args.snr,
+            "final_spread_bpm": 9.0 if args.no_pulse else 0.8, "mean_luma": 128.0, "skin_fraction": 0.7,
+            "estimates": 12, "min_snr_db": 3.0, "gate_sec_window": 9.5, "gate_sec_stable": 1.0,
+            "gate_sec_snr": 19.0 if args.no_pulse else 0.0, "gate_sec_face": 0.0,
+            "last_gate": "SNR_BELOW_MIN" if args.no_pulse else "READY", "ae_locked": True,
+            "fps_range": "[30,30]", "device_model": "simulator",
+        },
     }
     if purpose == "ENROLLMENT":
         payload["reference_template"] = face

@@ -219,6 +219,33 @@ static void testEngineGapsAndOrder() {
     CHECK(e.update().samplesInWindow == 1, "NaN sample ignored");
 }
 
+static void testGateDiagnostics() {
+    std::printf("gate diagnostics\n");
+    Engine e;
+    Status s;
+    for (int i = 0; i < 360; ++i) {  // 12 s of a clean 75 BPM pulse at 30 fps
+        const double t = i / 30.0, p = 0.004 * std::sin(2 * PI * 1.25 * t);
+        e.addSample(t, 180 * (1 + 0.33 * p), 130 * (1 + 0.77 * p), 110 * (1 + 0.53 * p));
+        s = e.update();
+        if (i == 150) {  // 5 s in: window not full yet
+            CHECK(!s.windowOk && !s.stable, "window gate should be pending at 5 s");
+        }
+    }
+    CHECK(s.windowOk && s.agreeOk && s.snrOk && s.stable, "clean pulse: all gates pass (w%d a%d s%d)",
+          s.windowOk, s.agreeOk, s.snrOk);
+    CHECK(s.spreadBpm < 1.0, "spread %f", s.spreadBpm);
+
+    Config strict;
+    strict.minSnrDb = 99.0;  // impossible SNR: only the SNR gate should block
+    Engine e2(strict);
+    for (int i = 0; i < 360; ++i) {
+        const double t = i / 30.0, p = 0.004 * std::sin(2 * PI * 1.25 * t);
+        e2.addSample(t, 180 * (1 + 0.33 * p), 130 * (1 + 0.77 * p), 110 * (1 + 0.53 * p));
+        s = e2.update();
+    }
+    CHECK(s.windowOk && s.agreeOk && !s.snrOk && !s.stable, "only SNR gate pending");
+}
+
 int main() {
     testButterworth();
     testFiltfiltBand();
@@ -227,6 +254,7 @@ int main() {
     testSpectrumAndSnr();
     testSkinExtraction();
     testEngineGapsAndOrder();
+    testGateDiagnostics();
     if (g_failures) {
         std::printf("%d check(s) FAILED\n", g_failures);
         return 1;

@@ -9,7 +9,8 @@ import org.json.JSONObject
  *   {"v":1, "base_url":"http://192.168.1.10:8000", "session_id":"...",
  *    "purpose":"AUTH|ENROLLMENT|LIFE_CERTIFICATE", "nonce":"...",
  *    "challenge":{"id":"...","type":"BLINK_TWICE","timeout_s":8},
- *    "liveness":{"min_snr_db":3.0}}
+ *    "liveness":{"min_snr_db":3.0, "window_s":10, "stable_count":5,
+ *                "stable_tolerance_bpm":3.0, "timeout_s":30}}
  *
  * Older portals put only the bare session id (or {"session_id": ...}) in the
  * QR; those are accepted as purpose AUTH with no base URL.
@@ -23,6 +24,10 @@ data class QrPayload(
     val challengeType: String?,
     val challengeTimeoutSec: Int?,
     val minSnrDb: Double?,
+    val windowSec: Double? = null,
+    val stableCount: Int? = null,
+    val stableToleranceBpm: Double? = null,
+    val timeoutSec: Double? = null,
 ) {
     val isAuth: Boolean get() = purpose == PURPOSE_AUTH
 
@@ -55,6 +60,10 @@ data class QrPayload(
                     challengeType = challenge?.optString("type")?.takeIf { it.isNotBlank() },
                     challengeTimeoutSec = challenge?.optInt("timeout_s", 0)?.takeIf { it > 0 },
                     minSnrDb = liveness?.optDouble("min_snr_db")?.takeIf { !it.isNaN() },
+                    windowSec = liveness?.optDouble("window_s")?.takeIf { !it.isNaN() && it in 6.0..20.0 },
+                    stableCount = liveness?.optInt("stable_count", 0)?.takeIf { it in 2..20 },
+                    stableToleranceBpm = liveness?.optDouble("stable_tolerance_bpm")?.takeIf { !it.isNaN() && it > 0.0 },
+                    timeoutSec = liveness?.optDouble("timeout_s")?.takeIf { !it.isNaN() && it in 15.0..120.0 },
                 )
             } catch (e: JSONException) {
                 null

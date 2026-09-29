@@ -16,6 +16,16 @@ data/match_scores.csv. Workflow:
 Vary lighting, distance, glasses and time of day across the genuine scans,
 so the thresholds reflect real conditions rather than one perfect setup.
 
+Scan speed / liveness thresholds (MIN_SNR_DB and the stability gate) use the
+per-scan diagnostics every app result carries (stored in the database):
+
+  python scripts/calibrate_thresholds.py scans                      # per-phone report + diagnosis
+  python scripts/calibrate_thresholds.py label-scans --last 5 --as genuine   # real person
+  python scripts/calibrate_thresholds.py label-scans --last 3 --as photo     # printed photo / screen
+
+With genuine and photo scans labelled, the report shows which MIN_SNR_DB
+values would let genuine scans pass while still rejecting every photo.
+
 Run from the backend/ folder.
 """
 
@@ -142,6 +152,137 @@ def cmd_report(args) -> int:
     return 0
 
 
+# ── Scan diagnostics (MIN_SNR_DB / stability gate) ────────────────────
+
+SCAN_LABELS = ("genuine", "photo", "video", "")
+
+
+def _scan_rows():
+    from sqlmodel import Session, select
+
+    from app.db.database import get_engine, init_db
+    from app.db.models import ScanDiagnostic
+    init_db()
+    with Session(get_engine()) as db:
+        return list(db.exec(select(ScanDiagnostic).order_by(ScanDiagnostic.id)).all())
+
+
+def _med(values):
+    vals = [v for v in values if v is not None]
+    return statistics.median(vals) if vals else None
+
+
+def _f(v, fmt="{:.1f}"):
+    return "—" if v is None else fmt.format(v)
+
+
+def diagnose(rows) -> list[str]:
+    """Plain-language reading of one phone's scans: camera, lighting, or thresholds."""
+    notes = []
+    passes = [r for r in rows if r.liveness_passed]
+    fails = [r for r in rows if r.liveness_passed is False]
+    fps = _med([r.avg_fps for r in rows])
+    luma = _med([r.mean_luma for r in rows])
+    if fps is not None and fps < 20:
+        notes.append(f"CAMERA: median {fps:.0f} fps (want ~30). The camera/phone delivers too few frames; "
+                     "scans are noisier and slower. Check fps_range and try brighter light (some cameras "
+                     "drop fps in dim light).")
+    if luma is not None and luma < 70:
+        notes.append(f"LIGHTING: face brightness {luma:.0f}/255 is dim. Try brighter, even light on the face.")
+    if any(r.ae_locked is False for r in rows):
+        notes.append("CAMERA: exposure lock not supported on this phone; auto-exposure changes add noise.")
+    face = sum(r.gate_sec_face or 0 for r in rows)
+    if rows and face / len(rows) > 5:
+        notes.append("POSITIONING: the face was often not detected (see gate_sec_face). "
+                     "Hold the phone at eye level, 30-40 cm away, face fully visible.")
+    for r in fails:
+        min_snr = r.min_snr_db if r.min_snr_db is not None else 0
+        if (r.gate_sec_snr or 0) > (r.gate_sec_stable or 0) and r.best_snr_db is not None:
+            if r.best_snr_db >= min_snr - 1.0:
+                notes.append(f"THRESHOLD?: scan {r.session_id[:8]} reached {r.best_snr_db:.1f} dB, just under "
+                             f"MIN_SNR_DB {min_snr:.1f}. Collect photo scans before lowering it.")
+            else:
+                notes.append(f"SIGNAL: scan {r.session_id[:8]} peaked at {r.best_snr_db:.1f} dB, far below "
+                             f"{min_snr:.1f}: camera/lighting, not the threshold.")
+        elif (r.gate_sec_stable or 0) > 0 and r.final_spread_bpm is not None:
+            if r.final_spread_bpm <= 6 and (r.best_snr_db or -99) >= min_snr:
+                notes.append(f"THRESHOLD?: scan {r.session_id[:8]} readings spread {r.final_spread_bpm:.1f} BPM "
+                             "with good SNR: the ±BPM tolerance may be tight (RPPG_STABLE_TOLERANCE_BPM).")
+            else:
+                notes.append(f"NOISE: scan {r.session_id[:8]} readings never agreed (spread "
+                             f"{r.final_spread_bpm:.1f} BPM): motion, lighting or camera noise.")
+    if passes and not fails and not notes:
+        notes.append("OK: every scan passed; no change needed.")
+    return notes
+
+
+def cmd_scans(args) -> int:
+    rows = _scan_rows()
+    if not rows:
+        print("No scan diagnostics yet. Scan with the Milestone 2+ app first.")
+        return 1
+    by_device: dict[str, list] = {}
+    for r in rows:
+        by_device.setdefault(r.device_model or "unknown", []).append(r)
+    print(f"{len(rows)} scans from {len(by_device)} phone(s)\n")
+    for device, rs in by_device.items():
+        passes = [r for r in rs if r.liveness_passed]
+        print(f"== {device}: {len(rs)} scans, {len(passes)} stable ({100 * len(passes) // len(rs)}%)")
+        print(f"   time to verify (passes): median {_f(_med([r.scan_seconds for r in passes]))} s   "
+              f"fps: median {_f(_med([r.avg_fps for r in rs]))} (min {_f(min((r.min_fps for r in rs if r.min_fps), default=None))})"
+              f"   range {rs[-1].fps_range}   AE lock: {sum(1 for r in rs if r.ae_locked)}/{len(rs)}")
+        print(f"   best SNR: passes {_f(_med([r.best_snr_db for r in passes]))} dB, "
+              f"fails {_f(_med([r.best_snr_db for r in rs if r.liveness_passed is False]))} dB   "
+              f"light {_f(_med([r.mean_luma for r in rs]), '{:.0f}')}/255   "
+              f"face lost {sum(r.face_lost_count or 0 for r in rs)}x")
+        print("   time blocked by gate (median s): window {} · stable {} · snr {} · face {}".format(
+            *(_f(_med([getattr(r, g) for r in rs])) for g in
+              ("gate_sec_window", "gate_sec_stable", "gate_sec_snr", "gate_sec_face"))))
+        for note in diagnose(rs):
+            print("   - " + note)
+        print()
+
+    genuine = [r.best_snr_db for r in rows if r.label == "genuine" and r.best_snr_db is not None]
+    photo = [r.best_snr_db for r in rows if r.label in ("photo", "video") and r.best_snr_db is not None]
+    if genuine and photo:
+        print("MIN_SNR_DB from labelled scans (best SNR each scan reached):")
+        print("  MIN_SNR_DB  genuine would pass  photo/video would pass")
+        for t in [x / 2 for x in range(0, 17)]:
+            g = sum(v >= t for v in genuine) / len(genuine)
+            ph = sum(v >= t for v in photo) / len(photo)
+            print(f"     {t:4.1f}          {g:5.0%}               {ph:5.0%}")
+        safe = max(photo) + 0.5
+        print(f"  Photos/videos peaked at {max(photo):.1f} dB → keep MIN_SNR_DB ≥ {safe:.1f}. "
+              f"Genuine scans: min {min(genuine):.1f}, median {statistics.median(genuine):.1f} dB.")
+        if min(genuine) < safe:
+            print("  ! Some genuine scans are below the safe level: improve lighting/camera rather than lowering it.")
+    else:
+        print("Label scans (label-scans --as genuine / --as photo) to get a data-based MIN_SNR_DB table.")
+    return 0
+
+
+def cmd_label_scans(args) -> int:
+    from sqlmodel import Session, select
+
+    from app.db.database import get_engine, init_db
+    from app.db.models import ScanDiagnostic
+    init_db()
+    with Session(get_engine()) as db:
+        stmt = select(ScanDiagnostic).order_by(ScanDiagnostic.id.desc())
+        if args.device:
+            stmt = stmt.where(ScanDiagnostic.device_model == args.device)
+        targets = list(db.exec(stmt.limit(args.last)).all())
+        for r in targets:
+            r.label = args.label or None
+            db.add(r)
+        db.commit()
+        print(f"Labelled {len(targets)} scan(s) as {args.label or '(none)'}:")
+        for r in reversed(targets):
+            print(f"  {r.created_at:%H:%M:%S} {r.device_model}  passed={r.liveness_passed}  "
+                  f"best_snr={_f(r.best_snr_db)} dB  time={_f(r.scan_seconds)} s")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--csv", default=str(default_csv()), help="Path to match_scores.csv")
@@ -156,6 +297,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_report = sub.add_parser("report", help="Show score distributions and suggested thresholds")
     p_report.set_defaults(func=cmd_report)
+
+    p_scans = sub.add_parser("scans", help="Per-phone scan speed report and diagnosis (camera / light / thresholds)")
+    p_scans.set_defaults(func=cmd_scans)
+
+    p_ls = sub.add_parser("label-scans", help="Label the most recent scans (genuine / photo / video)")
+    p_ls.add_argument("--as", dest="label", choices=SCAN_LABELS, required=True)
+    p_ls.add_argument("--last", type=int, required=True)
+    p_ls.add_argument("--device", help="Only scans from this device model")
+    p_ls.set_defaults(func=cmd_label_scans)
 
     args = parser.parse_args(argv)
     return args.func(args)

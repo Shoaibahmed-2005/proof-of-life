@@ -42,6 +42,35 @@ data class BiometricPayload(
     val framesUsed: Int? = null,
     @SerialName("app_version")
     val appVersion: String? = null,
+    val diagnostics: ScanDiagnosticsPayload? = null,
+)
+
+/**
+ * Per-scan measurements sent with every result (pass or fail), stored by the
+ * backend so thresholds can be calibrated from real phones
+ * (backend/scripts/calibrate_thresholds.py scans).
+ */
+@Serializable
+data class ScanDiagnosticsPayload(
+    @SerialName("scan_seconds") val scanSeconds: Double,
+    @SerialName("avg_fps") val avgFps: Double,
+    @SerialName("min_fps") val minFps: Double? = null,
+    val frames: Int,
+    @SerialName("face_lost_count") val faceLostCount: Int,
+    @SerialName("best_snr_db") val bestSnrDb: Double,
+    @SerialName("final_spread_bpm") val finalSpreadBpm: Double,
+    @SerialName("mean_luma") val meanLuma: Double? = null,
+    @SerialName("skin_fraction") val skinFraction: Double,
+    val estimates: Int,
+    @SerialName("min_snr_db") val minSnrDb: Double,
+    @SerialName("gate_sec_window") val gateSecWindow: Double,
+    @SerialName("gate_sec_stable") val gateSecStable: Double,
+    @SerialName("gate_sec_snr") val gateSecSnr: Double,
+    @SerialName("gate_sec_face") val gateSecFace: Double,
+    @SerialName("last_gate") val lastGate: String,
+    @SerialName("ae_locked") val aeLocked: Boolean,
+    @SerialName("fps_range") val fpsRange: String,
+    @SerialName("device_model") val deviceModel: String,
 )
 
 /**

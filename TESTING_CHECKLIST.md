@@ -93,6 +93,56 @@ These set `MIN_SNR_DB` in `backend/.env`, with no rebuild needed. It should sit 
 
 ---
 
+## D. Scan speed comparison (camera vs lighting vs thresholds)
+
+**Goal:** find out with data why a scan is slow or never verifies. Is it the phone's camera, the lighting, or our thresholds (10 s window, 5 readings within ±3 BPM, `MIN_SNR_DB` 3.0)? **Don't change any threshold before doing this.**
+
+**Setup:**
+- Same person, same room, same chair, same lighting. Phone about 30–40 cm from the face, at eye level, resting on something if possible.
+- On the scan screen, tap **Diagnostics** (bottom-right) to show the live readout. It's off by default for the demo.
+- Keep a logcat capture running (section 7.2 includes the `SentinelDiag` tag).
+
+| # | Test | Steps | Record |
+|---|---|---|---|
+| D.1 | Phone A, 5 scans | Practice Scan on the portal → scan the QR code → sit still. Count your wrist pulse for 30 s during each scan. | For each scan: **time to verify** (the `SCAN SUMMARY … time=` line, or the stopwatch), app BPM vs wrist BPM, **SNR** at pass, **fps**, and the `waiting for` value if it was slow. |
+| D.2 | Phone B (e.g. your father's), 5 scans | The same, with the other phone, same person and same spot. | Same values. |
+| D.3 | Bright light | Phone A, face lit by a lamp or window in front of you (not behind). | Same values. |
+| D.4 | Dim light | Phone A, main light off. | Same values. |
+| D.5 | Photo check | Phone A: hold a printed photo of the same person for 30 s. | The highest SNR it reached. It must **not** pass. |
+
+**After testing, on the laptop:**
+
+```powershell
+cd backend
+python scripts/calibrate_thresholds.py label-scans --last 1 --as photo      # right after D.5
+python scripts/calibrate_thresholds.py scans                                 # per-phone report + diagnosis
+```
+
+Label the genuine scans too (`label-scans --last N --as genuine`, right after each batch). The report then prints a table of which `MIN_SNR_DB` values would pass the genuine scans while rejecting the photo. Send the `scans` output, or `http://<laptop>:8000/api/v1/diagnostics.csv` (officer login needed), plus the logcat files.
+
+### How to read the diagnostics
+
+The readout (and each `SentinelDiag` line) shows: time, camera fps and range, pulse and spread, SNR (and minimum), light (0–255), AE lock, and **waiting for**. "Waiting for" names the gate that's still blocking:
+
+| You see | It means | So the cause is |
+|---|---|---|
+| `camera: ~15 fps` (or `avg_fps` under 20), range not `[30,30]` | The camera delivers too few frames. | **Camera/phone.** Try brighter light (many cameras drop to 15 fps in dim light). If it stays low in good light, that phone's camera is the limit. |
+| `light:` under ~60, prompt "Move to brighter light" | The face is too dark; the pulse signal is buried in sensor noise. | **Lighting.** |
+| `waiting for: window filling` for ~10 s, then passes | Normal: the first 10 s always fill the window. | Nothing wrong (it's the minimum time by design). |
+| `waiting for: readings not yet stable` for a long time, `spread` 3–6 BPM, SNR above minimum | The heart-rate readings are close but not within ±3 BPM. | **Threshold** may be tight (`RPPG_STABLE_TOLERANCE_BPM`). Only if this repeats with good light and ~30 fps. |
+| `waiting for: readings not yet stable`, `spread` large (10+ BPM) | The readings jump around: noise. | **Motion, lighting or camera**, not the threshold. |
+| `waiting for: SNR below minimum`, SNR within ~1 dB of the minimum | The signal is almost strong enough. | Possibly the **threshold**, but only lower `MIN_SNR_DB` if the photo test (D.5) stays well below the new value. |
+| `waiting for: SNR below minimum`, SNR far below the minimum | The pulse is too weak. | **Camera or lighting.** |
+| `waiting for: face lost`, or "face lost" counted often | Face detection keeps losing the face. | **Positioning** (distance, angle, glasses glare) or a weak camera. |
+| `AE lock: no` | This phone can't lock exposure; brightness changes add noise. | **Camera** limitation (still usable). |
+
+**Rule of thumb:**
+- Phone B much slower than phone A in the same conditions, with lower fps → **camera**.
+- Both slow in dim light but fine in bright light → **lighting**.
+- Both phones at ~30 fps, bright light, blocked on "readings not yet stable" with a small spread, or SNR just under the minimum → **thresholds**. Change them in `backend/.env` (no app rebuild needed) using the `scans` report, never below what the photo reached.
+
+---
+
 ## 2. Milestone 3: Face detection, same-face box, embeddings
 
 | # | Test | Steps | Expected result |
@@ -167,6 +217,7 @@ The app writes to these `logcat` tags:
 | `SentinelHardNative` | C++ rPPG engine: every estimate (BPM, SNR dB, median SNR, window fill, stable, skin fraction, pixels) |
 | `SentinelDSP` | Stable-pulse decision, 30 s no-pulse timeout, face-lost restarts |
 | `SentinelTelemetry` | Per-estimate BPM/SNR summary (one line every 0.5 s) |
+| `SentinelDiag` | Scan diagnostics: camera fps ranges, exposure lock, per-estimate fps/BPM/SNR/spread/gate/light, and one `SCAN SUMMARY` line per scan |
 | `TelemetryStreamer` | Live telemetry WebSocket |
 | `SentinelFace` | Face detection, face count, embeddings, template building (M3+) |
 | `SentinelChallenge` | Challenge issued, landmark values, pass or fail (M4+) |
@@ -187,7 +238,7 @@ Clear the log, start capturing, then reproduce the problem:
 
 ```powershell
 adb logcat -c
-adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelTelemetry:V TelemetryStreamer:V SentinelFace:V SentinelChallenge:V AndroidRuntime:E *:S > phone_log.txt
+adb logcat -v time SentinelHard:V SentinelHardNative:V SentinelDSP:V SentinelDiag:V SentinelTelemetry:V TelemetryStreamer:V SentinelFace:V SentinelChallenge:V AndroidRuntime:E *:S > phone_log.txt
 ```
 
 Press Ctrl+C after the problem happens, then send `phone_log.txt`. For a crash, also send the unfiltered log:

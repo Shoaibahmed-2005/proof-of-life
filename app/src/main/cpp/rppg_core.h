@@ -55,6 +55,7 @@ struct RgbMean {
     double r = 0, g = 0, b = 0;
     int pixels = 0;           // pixels used
     double skinFraction = 0;  // share of sampled pixels that passed the skin test
+    double luma = 0;          // mean brightness (0-255) of the pixels used: lighting guidance
     bool valid = false;
 };
 
@@ -74,6 +75,11 @@ struct Status {
     bool newEstimate = false; // an estimate was made on this update
     int estimateCount = 0;    // since the last reset
     int samplesInWindow = 0;
+    // Gate diagnostics: which condition is still holding the reading back.
+    bool windowOk = false;    // window at least minWindowFill full
+    bool agreeOk = false;     // last stableCount estimates within tolerance
+    bool snrOk = false;       // median SNR >= minSnrDb
+    double spreadBpm = 0;     // largest |estimate - median| among recent estimates
 };
 
 class Engine {

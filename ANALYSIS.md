@@ -6,7 +6,7 @@
 
 **Current plan (tick = committed and pushed):**
 - [x] **1. Wi-Fi fix.** `backend/run.py` (0.0.0.0), adapter-aware QR address (`app/core/network.py`), startup banner + LAN self-check, LAN CORS, `vite --host`, a network security config, app error reasons, and Wi-Fi setup docs.
-- [ ] **2. Scan-speed diagnostics.** On-screen diagnostics toggle (off by default), `SentinelDiag` logcat, per-scan summary stored by the backend, 30 fps request, AE/AWB lock, poor-conditions guidance, a scan-speed comparison test. Also: gate parameters come from the backend `.env` via the QR code, and face-loss tolerance is relaxed (it was 1 s, a likely cause of scans never finishing).
+- [x] **2. Scan-speed diagnostics.** On-screen diagnostics toggle (off by default), `SentinelDiag` logcat, per-scan summary stored by the backend, 30 fps request, AE/AWB lock, poor-conditions guidance, a scan-speed comparison test. Also: gate parameters come from the backend `.env` via the QR code, and face-loss tolerance is relaxed (it was 1 s, a likely cause of scans never finishing).
 - [ ] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
 - [ ] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
 - [ ] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
@@ -27,7 +27,7 @@
 - Don't hand-edit `.graphify/` or `.engram/`. Regenerate the graph with the graphify skill after backend structure changes.
 
 **How to run and test:**
-- **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (66 tests). Serve with `python run.py` (0.0.0.0:8000; prints the phone address). The demo officer is `officer` / `officer123`.
+- **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (71 tests). Serve with `python run.py` (0.0.0.0:8000; prints the phone address). The demo officer is `officer` / `officer123`.
 - **Without a phone:** `backend/scripts/simulate_phone.py --qr '<qr json>' --person A` (options: `--no-pulse`, `--challenge-fail`, `--person B`, `--similarity 0.6`).
 - **Clean demo:** `backend/scripts/reset_demo.py --yes --seed`.
 - **Portal:** `npm run dev` (http://localhost:5173) and `npx vite build`.

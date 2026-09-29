@@ -82,6 +82,7 @@ All paths are under `/api/v1`. 🔒 = officer token required (`Authorization: Be
 | `POST` | `/reviews/{certificate_id}/decision` 🔒 | `{decision: APPROVE\|REJECT, reason}` |
 | `GET` | `/reviews/frozen` 🔒 | Frozen pensions with their recent attempts |
 | `POST` | `/reviews/frozen/{pensioner_id}/restore` 🔒 | `{reason}`: lift a freeze after resolving the case |
+| `GET` | `/diagnostics` 🔒 / `/diagnostics.csv` 🔒 | Per-scan app measurements (time, fps, SNR, gates, light, device) |
 | `GET` | `/ledger` | Hash-chained audit entries, newest first (`offset`, `limit`, `event_type`); `head` = latest hash |
 | `GET` | `/ledger/verify` | Recompute the whole chain; reports the first altered entry |
 | `GET` | `/credentials/issuer` | The portal's issuer `did:key` |
@@ -192,6 +193,7 @@ python scripts/calibrate_thresholds.py report                         # suggests
 | `CHALLENGE_TIMEOUT_SECONDS` | `8` | Time the app allows for the challenge |
 | `BPM_MIN` / `BPM_MAX` | `40` / `220` | Plausible heart-rate range |
 | `MIN_SNR_DB` | `3.0` (placeholder) | Minimum rPPG SNR |
+| `RPPG_WINDOW_SEC` / `RPPG_STABLE_COUNT` / `RPPG_STABLE_TOLERANCE_BPM` / `RPPG_SCAN_TIMEOUT_SEC` | `10` / `5` / `3.0` / `30` | The app's stability gate, sent in the QR code (no app rebuild to tune) |
 | `FACE_T_HIGH` / `FACE_T_LOW` | `0.70` / `0.50` (placeholders) | Three-band thresholds |
 | `FACE_ANCHOR_MIN` | `0.55` (placeholder) | Minimum similarity to the anchor template |
 | `TEMPLATE_BLEND_ALPHA` | `0.10` | Weight of a new scan in the template update |

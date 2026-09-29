@@ -83,10 +83,13 @@ RgbMean meanSkinRgb(const PlaneView& y, const PlaneView& u, const PlaneView& v,
     out.skinFraction = static_cast<double>(skinN) / static_cast<double>(sampled);
     double my, mu, mv;
     if (out.skinFraction >= kMinSkinFraction) {
-        my = skinY / skinN; mu = skinU / skinN; mv = skinV / skinN; out.pixels = static_cast<int>(skinN);
+        my = skinY / static_cast<double>(skinN); mu = skinU / static_cast<double>(skinN);
+        mv = skinV / static_cast<double>(skinN); out.pixels = static_cast<int>(skinN);
     } else {
-        my = allY / allN; mu = allU / allN; mv = allV / allN; out.pixels = static_cast<int>(allN);
+        my = allY / static_cast<double>(allN); mu = allU / static_cast<double>(allN);
+        mv = allV / static_cast<double>(allN); out.pixels = static_cast<int>(allN);
     }
+    out.luma = my;
     // BT.601 full-range YCbCr → RGB. Linear, so converting the mean equals
     // the mean of the converted pixels.
     out.r = my + 1.402 * (mv - 128.0);
@@ -299,6 +302,7 @@ Status Engine::update() {
     const double t0 = samples_.front().t, t1 = samples_.back().t;
     const double span = t1 - t0;
     st.windowFill = std::clamp(span / cfg_.windowSec, 0.0, 1.0);
+    st.windowOk = st.windowFill >= cfg_.minWindowFill;
 
     const int posLen = static_cast<int>(std::lround(cfg_.posWindowSec * cfg_.fs));
     const int n = static_cast<int>(std::floor(span * cfg_.fs)) + 1;
@@ -347,9 +351,12 @@ Status Engine::update() {
         st.latestBpm = estimates_.back().bpm;
         st.snrDb = estimates_.back().snrDb;
         st.medianSnrDb = median(snrs);
-        bool agree = static_cast<int>(estimates_.size()) >= cfg_.stableCount;
-        for (double bpm : bpms) agree = agree && std::abs(bpm - st.bpm) <= cfg_.stableToleranceBpm;
-        st.stable = agree && st.windowFill >= cfg_.minWindowFill && st.medianSnrDb >= cfg_.minSnrDb;
+        double spread = 0;
+        for (double bpm : bpms) spread = std::max(spread, std::abs(bpm - st.bpm));
+        st.spreadBpm = spread;
+        st.agreeOk = static_cast<int>(estimates_.size()) >= cfg_.stableCount && spread <= cfg_.stableToleranceBpm;
+        st.snrOk = st.medianSnrDb >= cfg_.minSnrDb;
+        st.stable = st.agreeOk && st.windowOk && st.snrOk;
     }
     return st;
 }
