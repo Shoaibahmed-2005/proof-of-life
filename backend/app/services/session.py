@@ -1,13 +1,17 @@
 """
-Session Manager.
+Session service (database-backed).
 
-Manages the lifecycle of authentication sessions. Each session is created
-when the React frontend requests a QR code, and transitions through
-statuses as the Pixel 7 scans, verifies, and authenticates.
+A session is created when the portal needs a QR code. It carries a purpose
+(AUTH / ENROLLMENT / LIFE_CERTIFICATE), a single-use nonce and — for the new
+purposes — a random liveness challenge chosen here, so the phone cannot
+predict it. The QR payload also carries the backend base URL, so the app never
+needs a hard-coded address.
 
-Lifecycle:  PENDING  →  VERIFIED  →  GRANTED
-                ↘          ↘          ↘
-                      EXPIRED (timeout or manual)
+Lifecycle:  PENDING ─► PROCESSING ─► GRANTED | COMPLETED | REJECTED
+               └──────────────► EXPIRED (timeout / manual)
+
+`claim()` moves PENDING → PROCESSING atomically, so a session (and its nonce)
+can be used by exactly one verification request.
 """
 
 from __future__ import annotations
@@ -15,168 +19,199 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from datetime import datetime, timezone
-from enum import Enum
-from dataclasses import dataclass, field
+import socket
+from datetime import timedelta
+from urllib.parse import urlsplit
+
+from sqlalchemy import update
+from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.db.database import get_engine
+from app.db.models import AuthSession, SessionPurpose, SessionStatus
+from app.db.types import utcnow
 
 logger = logging.getLogger(__name__)
 
-
-class SessionStatus(str, Enum):
-    """Status of an authentication session."""
-    PENDING = "PENDING"      # Created, waiting for Pixel 7 to scan
-    VERIFIED = "VERIFIED"    # Pixel 7 scanned, payload received
-    GRANTED = "GRANTED"      # Signature + BPM valid, access granted
-    EXPIRED = "EXPIRED"      # Timed out or manually expired
+QR_PAYLOAD_VERSION = 1
+CHALLENGE_TYPES = ("BLINK_TWICE", "TURN_LEFT", "TURN_RIGHT")
+TERMINAL_STATUSES = {SessionStatus.GRANTED, SessionStatus.COMPLETED,
+                     SessionStatus.REJECTED, SessionStatus.EXPIRED}
 
 
-@dataclass
-class SessionData:
-    """Internal representation of a session."""
-    session_id: str
-    created_at: datetime
-    status: SessionStatus = SessionStatus.PENDING
-    bpm: int | None = None
-    device_id: str | None = None
-    granted_at: datetime | None = None
-    metadata: dict = field(default_factory=dict)
+# ── Base URL for the QR code ────────────────────────────────────────────
 
-    @property
-    def expires_at(self) -> datetime:
-        """Calculate the expiry time based on creation time."""
-        from datetime import timedelta
-        return self.created_at + timedelta(seconds=settings.SESSION_EXPIRY_SECONDS)
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if the session has expired by time or explicit status."""
-        if self.status == SessionStatus.EXPIRED:
-            return True
-        return datetime.now(timezone.utc) > self.expires_at
+def _lan_ip() -> str | None:
+    """This machine's LAN IP (no packets are sent; UDP connect only picks a route)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            ip = s.getsockname()[0]
+            return None if ip.startswith("127.") else ip
+    except OSError:
+        return None
 
 
-class SessionManager:
-    """In-memory session store with background cleanup."""
+def resolve_base_url(request_base_url: str) -> str:
+    """
+    PUBLIC_BASE_URL if configured; otherwise the URL the portal used to reach
+    us, with localhost swapped for the LAN IP so a phone on the same Wi-Fi can
+    connect. (The app falls back to localhost for `adb reverse` setups.)
+    """
+    if settings.PUBLIC_BASE_URL:
+        return settings.PUBLIC_BASE_URL.rstrip("/")
+    parts = urlsplit(request_base_url)
+    host, port = parts.hostname or "localhost", parts.port
+    if host in ("localhost", "127.0.0.1", "::1"):
+        host = _lan_ip() or host
+    netloc = f"{host}:{port}" if port else host
+    return f"{parts.scheme or 'http'}://{netloc}"
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, SessionData] = {}
-        self._cleanup_task: asyncio.Task | None = None
 
-    # ── CRUD ────────────────────────────────────────────────────────────
+def build_qr_payload(session: AuthSession, base_url: str) -> dict:
+    payload = {
+        "v": QR_PAYLOAD_VERSION,
+        "base_url": base_url,
+        "session_id": session.session_id,
+        "purpose": session.purpose.value,
+        "nonce": session.nonce,
+    }
+    if session.challenge_id:
+        payload["challenge"] = {
+            "id": session.challenge_id,
+            "type": session.challenge_type,
+            "timeout_s": settings.CHALLENGE_TIMEOUT_SECONDS,
+        }
+    return payload
 
-    def create_session(self) -> SessionData:
-        """Create a new session with a cryptographically random ID."""
-        session_id = secrets.token_urlsafe(32)
-        session = SessionData(
-            session_id=session_id,
-            created_at=datetime.now(timezone.utc),
-        )
-        self._sessions[session_id] = session
-        logger.info("Session created: %s", session_id)
-        return session
 
-    def get_session(self, session_id: str) -> SessionData | None:
-        """
-        Retrieve a session by ID.
+# ── CRUD ────────────────────────────────────────────────────────────────
 
-        Returns None if the session does not exist or has expired.
-        Automatically marks timed-out sessions as EXPIRED.
-        """
-        session = self._sessions.get(session_id)
-        if session is None:
-            return None
+def create(db: Session, purpose: SessionPurpose = SessionPurpose.AUTH,
+           pensioner_id: int | None = None, officer_id: int | None = None) -> AuthSession:
+    now = utcnow()
+    session = AuthSession(
+        session_id=secrets.token_urlsafe(32),
+        purpose=purpose,
+        pensioner_id=pensioner_id,
+        nonce=secrets.token_urlsafe(16),
+        created_by_officer=officer_id,
+        created_at=now,
+        expires_at=now + timedelta(seconds=settings.SESSION_EXPIRY_SECONDS),
+    )
+    if purpose is not SessionPurpose.AUTH:
+        session.challenge_id = secrets.token_urlsafe(8)
+        session.challenge_type = secrets.choice(CHALLENGE_TYPES)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    logger.info("Session created: %s purpose=%s", session.session_id, purpose.value)
+    return session
 
-        # Auto-expire if the time window has passed
-        if session.status not in (SessionStatus.EXPIRED, SessionStatus.GRANTED):
-            if session.is_expired:
-                session.status = SessionStatus.EXPIRED
-                logger.info("Session auto-expired: %s", session_id)
 
-        return session
+def get(db: Session, session_id: str) -> AuthSession | None:
+    """Returns the session (auto-marking it EXPIRED if its time is up), or None."""
+    session = db.get(AuthSession, session_id)
+    if session is None:
+        return None
+    if session.status in (SessionStatus.PENDING, SessionStatus.PROCESSING) and utcnow() > session.expires_at:
+        if session.status is SessionStatus.PENDING:
+            session.status = SessionStatus.EXPIRED
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+    return session
 
-    def update_status(
-        self,
-        session_id: str,
-        status: SessionStatus,
-        bpm: int | None = None,
-        device_id: str | None = None,
-    ) -> SessionData | None:
-        """Update a session's status and optional metadata."""
-        session = self.get_session(session_id)
-        if session is None:
-            return None
 
-        session.status = status
-        if bpm is not None:
-            session.bpm = bpm
-        if device_id is not None:
-            session.device_id = device_id
-        if status == SessionStatus.GRANTED:
-            session.granted_at = datetime.now(timezone.utc)
+def is_expired(session: AuthSession) -> bool:
+    return session.status is SessionStatus.EXPIRED or utcnow() > session.expires_at
 
-        logger.info("Session %s status → %s", session_id, status.value)
-        return session
 
-    def expire_session(self, session_id: str) -> bool:
-        """Explicitly expire a session."""
-        session = self._sessions.get(session_id)
-        if session is None:
-            return False
+def claim(db: Session, session_id: str) -> bool:
+    """Atomically PENDING → PROCESSING. False if already used, expired or unknown."""
+    now = utcnow()
+    result = db.execute(
+        update(AuthSession)
+        .where(AuthSession.session_id == session_id)
+        .where(AuthSession.status == SessionStatus.PENDING)
+        .values(status=SessionStatus.PROCESSING, used_at=now)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+def finish(db: Session, session: AuthSession, status: SessionStatus, *,
+           outcome: str | None = None, reason_code: str | None = None,
+           reason: str | None = None, certificate_id: int | None = None,
+           bpm: float | None = None, device_id: str | None = None,
+           commit: bool = True) -> AuthSession:
+    session.status = status
+    session.outcome = outcome
+    session.reason_code = reason_code
+    session.reason = reason
+    session.completed_at = utcnow()
+    if certificate_id is not None:
+        session.certificate_id = certificate_id
+    if bpm is not None:
+        session.bpm = bpm
+    if device_id is not None:
+        session.device_id = device_id
+    db.add(session)
+    if commit:
+        db.commit()
+        db.refresh(session)
+    logger.info("Session %s → %s (%s)", session.session_id, status.value, reason_code or outcome or "")
+    return session
+
+
+def expire(db: Session, session_id: str) -> bool:
+    session = db.get(AuthSession, session_id)
+    if session is None:
+        return False
+    if session.status not in TERMINAL_STATUSES:
         session.status = SessionStatus.EXPIRED
-        logger.info("Session manually expired: %s", session_id)
-        return True
-
-    # ── Background Cleanup ──────────────────────────────────────────────
-
-    def cleanup_expired(self) -> int:
-        """Remove all expired sessions from the store. Returns count removed."""
-        expired_ids = [
-            sid for sid, s in self._sessions.items()
-            if s.is_expired and s.status in (SessionStatus.EXPIRED, SessionStatus.GRANTED)
-        ]
-        for sid in expired_ids:
-            del self._sessions[sid]
-
-        if expired_ids:
-            logger.info("Cleaned up %d expired sessions", len(expired_ids))
-        return len(expired_ids)
-
-    async def start_cleanup_loop(self, interval_seconds: int = 60) -> None:
-        """Run periodic cleanup of expired sessions."""
-        logger.info("Session cleanup loop started (interval=%ds)", interval_seconds)
-        try:
-            while True:
-                await asyncio.sleep(interval_seconds)
-                self.cleanup_expired()
-        except asyncio.CancelledError:
-            logger.info("Session cleanup loop stopped")
-
-    def start_background_cleanup(self, interval_seconds: int = 60) -> None:
-        """Launch the cleanup loop as a background asyncio task."""
-        self._cleanup_task = asyncio.create_task(
-            self.start_cleanup_loop(interval_seconds)
-        )
-
-    def stop_background_cleanup(self) -> None:
-        """Cancel the background cleanup task."""
-        if self._cleanup_task and not self._cleanup_task.done():
-            self._cleanup_task.cancel()
-            logger.info("Session cleanup task cancelled")
-
-    # ── Debug / Introspection ───────────────────────────────────────────
-
-    @property
-    def active_count(self) -> int:
-        """Number of non-expired sessions."""
-        return sum(1 for s in self._sessions.values() if not s.is_expired)
-
-    @property
-    def total_count(self) -> int:
-        """Total sessions in the store (including expired)."""
-        return len(self._sessions)
+        db.add(session)
+        db.commit()
+    return True
 
 
-# Singleton instance shared across the application
-session_manager = SessionManager()
+def expire_stale(db: Session) -> int:
+    """Marks timed-out PENDING sessions as EXPIRED. Sessions are kept for audit."""
+    result = db.execute(
+        update(AuthSession)
+        .where(AuthSession.status == SessionStatus.PENDING)
+        .where(AuthSession.expires_at < utcnow())
+        .values(status=SessionStatus.EXPIRED)
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def find_pending_for_pensioner(db: Session, pensioner_id: int, purpose: SessionPurpose) -> list[AuthSession]:
+    stmt = (select(AuthSession)
+            .where(AuthSession.pensioner_id == pensioner_id)
+            .where(AuthSession.purpose == purpose)
+            .where(AuthSession.status == SessionStatus.PENDING))
+    return list(db.exec(stmt).all())
+
+
+# ── Background maintenance ──────────────────────────────────────────────
+
+async def maintenance_loop(interval_seconds: int = 60) -> None:
+    """Expires stale sessions and applies the certificate-deadline freeze rule."""
+    from app.services import pensioners  # local import avoids a cycle
+
+    logger.info("Maintenance loop started (interval=%ds)", interval_seconds)
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                with Session(get_engine()) as db:
+                    n = expire_stale(db)
+                    if n:
+                        logger.info("Expired %d stale sessions", n)
+                    pensioners.apply_deadline_freeze(db)
+            except Exception:
+                logger.exception("Maintenance pass failed")
+    except asyncio.CancelledError:
+        logger.info("Maintenance loop stopped")

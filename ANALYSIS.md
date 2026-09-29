@@ -4,7 +4,7 @@ _Written 2026-09-29 for Step 0 of `build-prompt.md`. This file is the record of 
 
 Sources read: `.graphify/GRAPH_REPORT.md` and `graph.json` (backend map), every file in `backend/app/`, the whole Android `app/` module (Kotlin, C++, Gradle, manifest, resources), the Vite frontend (`src/`, `index.html`, `vite.config.js`, `package.json`), every `.md` file in the repo (`build-prompt.md`, `DESIGN.md`, `backend/README.md`, `backend/EXPLAINER.md`, the 10 files under `.artifacts/`), and `docs/design-reference.jpeg`.
 
-Only one file change has been made so far: `docs/design-reference.png` → `docs/design-reference.jpeg` in `build-prompt.md` (two places) and `DESIGN.md` (one place). No code has been changed.
+Sections 0–7 describe the codebase **as it was at Step 0**. Section 11 (the change log) records what each milestone changed, and is the place to look for the current state.
 
 ---
 
@@ -324,3 +324,56 @@ Each milestone ends with: a build (or a teammate build if D1 is declined), an en
 1. Which build is installed? **Settings → Apps → SentinelHard → App details**: the version and install date. Is it from this repo, or a teammate's copy?
 2. If you can, run one scan with the phone connected and send me `adb logcat -s SentinelHardNative SentinelTelemetry`. That lets me confirm the SNR really is frozen, rather than just slow-moving.
 3. Hold a printed photo up to the current app. My prediction is that it reaches "VERIFIED HUMAN". If it does, we have a useful before/after for the pitch.
+
+---
+
+## 11. Change log (current state)
+
+**Order changed:** the teammate's Android code hadn't been pushed (`origin/master` was still `49c0418`), so the backend and portal milestones (5 → 6 → 7) go first. M2–M4 follow once his code is in.
+
+### M5: Backend data model and verification pipeline (2026-09-29)
+
+⚠️ **Backend structure changed: please regenerate the Graphify graph** (`.graphify/` still shows the Step 0 backend).
+
+**Removed (D4):** `app/api/` (the whole unused package), the six "Deprecated stub" files in `routers/`, `schemas/` and `services/`, and the `db/session.py` stub.
+
+**Backend layout now** (see `backend/README.md` for the full tree):
+- **`db/`**: `database.py` (SQLite engine via SQLModel, `init_db`, `get_db`), `models.py` (officers, pensioners, biometric_templates, devices, life_certificates, auth_sessions, audit_ledger), `types.py` (UTC datetime type).
+- **`core/`**: `config.py` gains thresholds and keys, `security.py` is new (PBKDF2 passwords, HMAC officer tokens, Fernet template cipher), `deps.py` is new (DB and officer-auth dependencies).
+- **`services/`**:
+  - `verification.py` is **new**: the ordered pipeline. `routers/auth.py` is now a thin wrapper around it.
+  - `face_match.py` is new: cosine, three bands, blend update, encryption.
+  - `session.py` was **rewritten**: DB-backed, with purpose, nonce, challenge, QR payload, LAN base URL and an atomic claim. The in-memory `SessionManager` is gone.
+  - `pensioners.py` is new: freeze and restore rules.
+  - `ledger.py` is new: `LedgerBackend` interface plus the local hash chain (append/list/verify).
+  - `score_log.py` is new.
+  - `connection_manager.py` now supports several sockets per channel plus an officer events channel.
+  - `liveness.py` accepts a decimal BPM and adds `check_liveness` (dB SNR).
+- **`routers/`**:
+  - New: `officers.py`, `pensioners.py`, `enroll.py`, `reviews.py`.
+  - `session.py` gains purposes and `qr_payload`.
+  - `ws.py` gains `/ws/events` and `/ws/telemetry/{session_id}` relays.
+- **`schemas/`**: `auth.py` has the §4.4 payload (legacy payload still accepted as `AUTH`); `session.py` has purpose, challenge and QR; `pensioner.py` is new.
+- **`scripts/`**: `calibrate_thresholds.py`, `simulate_phone.py` (dev tool, software key), `seed_demo.py` (fictional data).
+- **`tests/`**: 47+ pytest tests. `requirements-dev.txt` is new. `data/` is gitignored.
+
+**Fixed from §7:**
+- #1: a decimal BPM is now accepted.
+- #3: the simulate button still exists in the portal, and **is removed in M7**. The backend side is honest, because the phone simulator reports `SOFTWARE`.
+- #4: the device key is bound per pensioner.
+- #8: a failed session becomes REJECTED and is pushed to the portal.
+- #12: everything is persisted in SQLite.
+- #13: timestamp skew is ±120 s, and the session nonce is inside the signed payload.
+- #14: the phone → portal telemetry relay exists. The app starts using it in M4.
+
+**Design decisions made in M5 (beyond the brief):**
+- **Device binding** is checked right after the session lookup, because the pensioner is only known from the session. For ENROLLMENT the key is stored but **inactive until the officer approves**.
+- **Single use:** `PENDING → PROCESSING` is an atomic UPDATE. Checks that happen before it (bad signature, nonce, purpose, expired) do **not** use up the session, so a genuine retry still works.
+- **Freeze counting:** only `NO_PULSE`, `CHALLENGE_FAILED` and `FACE_MISMATCH` count toward `MAX_FAILED_ATTEMPTS`. Otherwise a stranger's phone (`DEVICE_MISMATCH`) could freeze anyone's pension. All rejections are still recorded, so they show up in the treasury view.
+- **Frozen pensions** are only released by an officer: a strong match on a frozen pension goes to review (`FROZEN_REVIEW`).
+- **Anchor check on every decision:** an approval needs `score ≥ T_high` **and** `anchor_score ≥ FACE_ANCHOR_MIN`. Tests show a template *can* drift (it stays ≥ `ANCHOR_MIN` from the anchor), but an impostor's own face is never auto-approved, because it fails the anchor check.
+- **Consent** is required twice: `consent: true` when the portal creates a life-certificate session, and `consent: true` inside every signed payload (stored as `consent_at`).
+- **Only one live QR** per pensioner and purpose: creating a new one expires the older one.
+- **QR `base_url`:** `PUBLIC_BASE_URL`, or else the laptop's LAN IP. The app will fall back to `localhost` for `adb reverse` (M2).
+- **Thresholds:** `FACE_T_HIGH=0.70`, `FACE_T_LOW=0.50`, `FACE_ANCHOR_MIN=0.55` and `MIN_SNR_DB=3.0` are **placeholders** until calibrated with `calibrate_thresholds.py` on real scans.
+- **Payload additions beyond §4.4:** `model_version`, `key_security_level` and `consent` (all optional for AUTH).

@@ -25,6 +25,7 @@ dist-ssr/
 
 # Python / Virtual Environment
 backend/venv/
+backend/data/
 venv/
 __pycache__/
 *.py[cod]

@@ -132,3 +132,28 @@ def verify_signature(
     except Exception as e:
         logger.error("Signature verification error: %s", e)
         raise SignatureVerificationError(f"Verification error: {e}") from e
+
+
+def require_p256(public_key: ec.EllipticCurvePublicKey) -> None:
+    """The app's Keystore key is P-256; reject anything else."""
+    if not isinstance(public_key.curve, ec.SECP256R1):
+        raise InvalidPublicKeyError(f"Expected a P-256 key, got {public_key.curve.name}")
+
+
+def public_key_to_pem(public_key_b64: str) -> str:
+    """Base64 DER (SubjectPublicKeyInfo) → PEM, for storage in the devices table."""
+    key = load_public_key_from_der(public_key_b64)
+    return key.public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
+
+
+def same_public_key(public_key_b64: str, stored_pem: str) -> bool:
+    """True if the Base64 DER key and the stored PEM key are the same key."""
+    try:
+        a = load_public_key_from_der(public_key_b64)
+        b = load_public_key_from_pem(stored_pem)
+    except InvalidPublicKeyError:
+        return False
+    fmt = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return a.public_bytes(*fmt) == b.public_bytes(*fmt)

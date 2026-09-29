@@ -1,9 +1,13 @@
 """
 WebSocket Connection Manager.
 
-Manages active WebSocket connections keyed by session ID, enabling
-targeted message delivery (e.g., pushing ACCESS_GRANTED to a specific
-frontend session).
+Channels:
+- one per session_id: the portal page that shows the QR code listens here
+  (ACCESS_GRANTED, MEASURING, CHALLENGE_ISSUED, CERTIFICATE_ISSUED, ...).
+- EVENTS_CHANNEL: officer dashboards listen here for system-wide events
+  (new review items, registrations captured, status changes).
+
+Several sockets may listen on the same channel (e.g. a page reopened in a new tab).
 """
 
 from __future__ import annotations
@@ -15,78 +19,73 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
+EVENTS_CHANNEL = "__events__"
+
 
 class ConnectionManager:
-    """Thread-safe manager for active WebSocket connections."""
+    """Manager for active WebSocket connections, grouped by channel."""
 
     def __init__(self) -> None:
-        # session_id -> WebSocket
-        self._active_connections: dict[str, WebSocket] = {}
+        self._channels: dict[str, set[WebSocket]] = {}
 
     @property
     def active_sessions(self) -> list[str]:
-        """Return a list of currently connected session IDs."""
-        return list(self._active_connections.keys())
+        """Channels (session IDs) with at least one listener."""
+        return [c for c, s in self._channels.items() if s and c != EVENTS_CHANNEL]
 
-    async def connect(self, websocket: WebSocket, session_id: str) -> None:
-        """Accept and register a WebSocket connection for a session."""
+    async def connect(self, websocket: WebSocket, channel: str) -> None:
+        """Accept and register a WebSocket connection on a channel."""
         await websocket.accept()
-        self._active_connections[session_id] = websocket
-        logger.info("WebSocket connected: session_id=%s", session_id)
+        self._channels.setdefault(channel, set()).add(websocket)
+        logger.info("WebSocket connected: channel=%s", channel)
 
-    def disconnect(self, session_id: str) -> None:
-        """Remove a WebSocket connection for a session."""
-        removed = self._active_connections.pop(session_id, None)
-        if removed:
-            logger.info("WebSocket disconnected: session_id=%s", session_id)
-
-    def is_connected(self, session_id: str) -> bool:
-        """Check if a session has an active WebSocket connection."""
-        return session_id in self._active_connections
-
-    async def send_to_session(self, session_id: str, data: dict[str, Any]) -> bool:
-        """
-        Send a JSON message to a specific session's WebSocket.
-
-        Returns True if the message was sent, False if the session
-        is not connected.
-        """
-        websocket = self._active_connections.get(session_id)
+    def disconnect(self, channel: str, websocket: WebSocket | None = None) -> None:
+        """Remove one socket (or every socket if none given) from a channel."""
+        sockets = self._channels.get(channel)
+        if not sockets:
+            return
         if websocket is None:
-            logger.warning(
-                "Cannot send to session_id=%s: not connected", session_id
-            )
-            return False
+            sockets.clear()
+        else:
+            sockets.discard(websocket)
+        if not sockets:
+            self._channels.pop(channel, None)
+        logger.info("WebSocket disconnected: channel=%s", channel)
 
-        try:
-            await websocket.send_json(data)
-            logger.info(
-                "Sent message to session_id=%s: event=%s",
-                session_id,
-                data.get("event", "unknown"),
-            )
-            return True
-        except Exception:
-            logger.exception(
-                "Failed to send message to session_id=%s", session_id
-            )
-            self.disconnect(session_id)
+    def is_connected(self, channel: str) -> bool:
+        return bool(self._channels.get(channel))
+
+    async def send_to_session(self, channel: str, data: dict[str, Any]) -> bool:
+        """
+        Send a JSON message to every socket on a channel.
+        Returns True if at least one socket received it.
+        """
+        sockets = list(self._channels.get(channel, ()))
+        if not sockets:
+            logger.info("No listener for channel=%s (event=%s)", channel, data.get("event"))
             return False
+        delivered = False
+        for ws in sockets:
+            try:
+                await ws.send_json(data)
+                delivered = True
+            except Exception:
+                logger.warning("Dropping dead socket on channel=%s", channel)
+                self.disconnect(channel, ws)
+        if delivered:
+            logger.info("Sent event=%s to channel=%s", data.get("event", "unknown"), channel)
+        return delivered
+
+    async def publish(self, session_id: str | None, data: dict[str, Any]) -> None:
+        """Send to the session's channel (if any) and to the officer events channel."""
+        if session_id:
+            await self.send_to_session(session_id, data)
+        await self.send_to_session(EVENTS_CHANNEL, data)
 
     async def broadcast(self, data: dict[str, Any]) -> None:
         """Send a JSON message to all connected WebSocket clients."""
-        disconnected: list[str] = []
-        for session_id, websocket in self._active_connections.items():
-            try:
-                await websocket.send_json(data)
-            except Exception:
-                logger.exception(
-                    "Broadcast failed for session_id=%s", session_id
-                )
-                disconnected.append(session_id)
-
-        for sid in disconnected:
-            self.disconnect(sid)
+        for channel in list(self._channels):
+            await self.send_to_session(channel, data)
 
 
 # Singleton instance shared across the application

@@ -2,60 +2,99 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.db.models import KeyType, SessionPurpose
 
 
 class BiometricPayload(BaseModel):
     """
-    The deserialized payload from the Pixel 7.
+    The JSON the phone builds and signs inside Titan M2 (StrongBox).
 
-    This is what the Android app builds before signing:
-    {session_id, bpm, timestamp, device_id, snr, variance}
+    Legacy app (purpose omitted → AUTH):
+        {session_id, bpm, timestamp, device_id, snr, variance}
+
+    Current app (build-prompt §4.4), purpose ENROLLMENT or LIFE_CERTIFICATE:
+        {session_id, purpose, nonce, timestamp, device_id,
+         bpm, snr, liveness_passed, challenge_id, challenge_passed,
+         face_embedding | reference_template, frames_used, app_version,
+         model_version, key_security_level, consent}
     """
     session_id: str
-    bpm: int = Field(..., ge=0, description="Heart rate in beats per minute")
+    purpose: SessionPurpose = SessionPurpose.AUTH
+    nonce: Optional[str] = None
     timestamp: datetime
     device_id: str
-    snr: Optional[float] = Field(default=5.0, description="Signal-to-Noise Ratio of the rPPG signal in dB")
-    variance: Optional[float] = Field(default=2.5, description="Statistical variance of BPM over measurement window")
+    bpm: float = Field(..., ge=0, description="Heart rate in beats per minute")
+    snr: Optional[float] = Field(default=None, description="rPPG signal-to-noise ratio (dB for current app)")
+    variance: Optional[float] = Field(default=None, description="Legacy: head micro-motion variance")
+    liveness_passed: Optional[bool] = None
+    challenge_id: Optional[str] = None
+    challenge_passed: Optional[bool] = None
+    face_embedding: Optional[list[float]] = Field(default=None, description="LIFE_CERTIFICATE probe embedding")
+    reference_template: Optional[list[float]] = Field(default=None, description="ENROLLMENT averaged template")
+    frames_used: Optional[int] = Field(default=None, ge=0)
+    app_version: Optional[str] = None
+    model_version: Optional[str] = None
+    key_security_level: Optional[KeyType] = None
+    consent: Optional[bool] = None
+
+    @field_validator("timestamp")
+    @classmethod
+    def _assume_utc(cls, v: datetime) -> datetime:
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+
+    @field_validator("key_security_level", mode="before")
+    @classmethod
+    def _normalise_key_level(cls, v):
+        if v is None:
+            return None
+        v = str(v).strip().upper()
+        return v if v in KeyType.__members__ else KeyType.UNKNOWN.value
+
+    @model_validator(mode="after")
+    def _required_for_purpose(self) -> "BiometricPayload":
+        if self.purpose is SessionPurpose.AUTH:
+            return self
+        required = ["nonce", "snr", "liveness_passed", "challenge_id", "challenge_passed",
+                    "frames_used", "app_version"]
+        if self.purpose is SessionPurpose.LIFE_CERTIFICATE:
+            required.append("face_embedding")
+        else:
+            required.append("reference_template")
+        missing = [f for f in required if getattr(self, f) is None]
+        if missing:
+            raise ValueError(f"Missing fields for {self.purpose.value}: {', '.join(missing)}")
+        return self
 
 
 class VerifyRequest(BaseModel):
     """
-    The full verification request sent by the Pixel 7 to the backend.
-
-    The payload is base64-encoded JSON, signed with the Titan M2 private key.
-    The signature and public key are also base64-encoded.
+    Sent by the phone. `payload` is the Base64 of the exact JSON bytes that were
+    signed; the signature is DER ECDSA-SHA256 (P-256) over those bytes.
     """
-    payload: str = Field(
-        ...,
-        description="Base64-encoded JSON of BiometricPayload",
-    )
-    signature: str = Field(
-        ...,
-        description="Base64-encoded ECDSA-SHA256 signature over the payload bytes",
-    )
-    public_key: str = Field(
-        ...,
-        description="Base64-encoded DER public key (SubjectPublicKeyInfo format)",
-    )
+    payload: str = Field(..., description="Base64-encoded JSON of BiometricPayload")
+    signature: str = Field(..., description="Base64-encoded ECDSA-SHA256 signature over the payload bytes")
+    public_key: str = Field(..., description="Base64-encoded DER public key (SubjectPublicKeyInfo)")
     attestation_chain: Optional[list[str]] = Field(
         default=None,
-        description="Optional list of base64-encoded DER certificates for Android Key Attestation",
+        description="Optional base64-encoded DER certificates for Android Key Attestation",
     )
 
 
 class VerifyResponse(BaseModel):
-    """Response returned after verifying a biometric payload."""
-    status: str = Field(
-        ...,
-        description="ACCESS_GRANTED or ACCESS_DENIED",
-    )
+    """
+    `status` keeps the legacy values for AUTH (ACCESS_GRANTED / ACCESS_DENIED).
+    For ENROLLMENT / LIFE_CERTIFICATE, `outcome` carries the result:
+    CAPTURED, ISSUED, UNDER_REVIEW or REJECTED.
+    """
+    status: str = Field(..., description="ACCESS_GRANTED or ACCESS_DENIED")
     session_id: str
-    reason: Optional[str] = Field(
-        default=None,
-        description="Human-readable reason for denial, if applicable",
-    )
+    reason: Optional[str] = Field(default=None, description="Human-readable reason, if not approved")
+    reason_code: Optional[str] = None
+    purpose: Optional[SessionPurpose] = None
+    outcome: Optional[str] = None
+    certificate_id: Optional[int] = None

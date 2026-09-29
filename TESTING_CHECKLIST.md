@@ -94,6 +94,8 @@ There are no Android code changes in these milestones, so the app doesn't need t
 
 Team member **A** is the registered pensioner. Team member **B** is someone else. Do these in order.
 
+**Use the same Pixel 7 for every scenario.** The backend binds A's pension to the phone used in S1. If B scans with a different phone, the result is "Rejected: this phone is not the device registered for this pensioner", not the face mismatch that S3 is meant to show.
+
 | # | Scenario | Steps | Expected result on phone | Expected result on portal |
 |---|---|---|---|---|
 | S1 | **Register A** | Officer logs in → Register Pensioner → enter A's dummy details → QR code → A scans and completes the face scan → officer clicks **Approve** | "Registration captured" | A appears in Records as **Active** (green badge). A ledger entry is added. |
@@ -103,6 +105,10 @@ Team member **A** is the registered pensioner. Team member **B** is someone else
 | S5 | **Video of A** | Submit with A's ID → play a **video** of A on another phone or laptop screen in front of the camera | "Rejected: challenge failed" (and/or "screen replay detected") | Red result with the same reason. |
 
 After S1–S5, the **Audit Ledger → Verify chain integrity** button shows green. The Treasury page shows 1 certificate issued and 3 rejections split by reason.
+
+**A's pension is frozen after S5.** With `MAX_FAILED_ATTEMPTS=3` (backend `.env`), the three failed attempts in S3–S5 freeze it, and the portal shows **Frozen**. An officer restores it through the Review Queue. To rehearse again, register a new pensioner, or raise `MAX_FAILED_ATTEMPTS` in `backend/.env` and restart the backend.
+
+**Rehearsing without the phone:** `backend/scripts/simulate_phone.py` runs all five outcomes against the backend and portal, using a software key that shows as SOFTWARE (see `backend/README.md`).
 
 Record the score shown for S2 and S3 (for threshold calibration).
 
