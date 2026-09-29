@@ -1,5 +1,28 @@
 # ANALYSIS.md: Current Codebase Record
 
+## ▶ RESUME HERE (for a new agent or chat)
+
+**Status (2026-09-30):** Milestones **5, 2 and 6 are done and pushed**. **M7 (portal) is in progress.** M3 and M4 (Android face and challenge) wait for the teammate's M2 phone results. M8 comes last. Build order: 5 → 2 → 6 → **7** → 3 → 4 → 8.
+
+**Read first:**
+- `build-prompt.md` (the brief) and `DESIGN.md` (the visual rules). Re-read the relevant sections before each milestone.
+- §11 below (the change log: what each milestone built).
+- `.graphify/GRAPH_REPORT.md` (backend map, regenerated after M6). It covers `backend/` only.
+
+**Working rules the user set:**
+- Do one milestone at a time. After each one, summarise it, list "verified here" vs "must test on phone", and wait for "continue".
+- Commit and push to `origin master` (https://github.com/danishjk2156/SentinelHard.git) after each milestone. The teammate pulls from there.
+- **No Android toolchain on this laptop.** Kotlin can't be compiled here. The teammate builds in Android Studio; see `TESTING_CHECKLIST.md`. The C++ engine *is* compiled and tested here with zig (`python tools/rppg/run_tests.py`).
+- Ask before deleting files, changing the signing scheme, adding heavy dependencies, or downloading files. M3 needs approval to download an MIT/Apache MobileFaceNet `.tflite`, with its source and licence recorded in `MODEL_INFO.md`.
+- Don't hand-edit `.graphify/` or `.engram/`. Regenerate the graph with the graphify skill after backend structure changes.
+
+**How to run and test:**
+- **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (61 tests). Serve with `uvicorn app.main:app --host 0.0.0.0 --port 8000`. The demo officer is `officer` / `officer123`.
+- **Without a phone:** `backend/scripts/simulate_phone.py --qr '<qr json>' --person A` (options: `--no-pulse`, `--challenge-fail`, `--person B`, `--similarity 0.6`).
+- **Clean demo:** `backend/scripts/reset_demo.py --yes --seed`.
+- **Portal:** `npm run dev` (http://localhost:5173) and `npx vite build`.
+- **Browser preview:** `.claude/launch.json` has `backend` and `portal` configs.
+
 _Written 2026-09-29 for Step 0 of `build-prompt.md`. This file is the record of the codebase and is updated whenever the structure changes._
 
 Sources read: `.graphify/GRAPH_REPORT.md` and `graph.json` (backend map), every file in `backend/app/`, the whole Android `app/` module (Kotlin, C++, Gradle, manifest, resources), the Vite frontend (`src/`, `index.html`, `vite.config.js`, `package.json`), every `.md` file in the repo (`build-prompt.md`, `DESIGN.md`, `backend/README.md`, `backend/EXPLAINER.md`, the 10 files under `.artifacts/`), and `docs/design-reference.jpeg`.
