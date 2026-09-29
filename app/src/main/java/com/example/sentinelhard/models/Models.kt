@@ -22,8 +22,9 @@ data class VerifyRequest(
  *
  * Optional fields default to null and are left out of the JSON when null
  * (kotlinx.serialization's default Json does not encode default values).
- * Milestones 3–4 add face_embedding / reference_template, challenge fields
- * and key_security_level.
+ * build-prompt §4.4: challenge result, the face embedding (life certificate)
+ * or reference template (registration), the face model version, which kind of
+ * key signed it (StrongBox / TEE / software), and the recorded consent.
  */
 @Serializable
 data class BiometricPayload(
@@ -38,6 +39,21 @@ data class BiometricPayload(
     val snr: Double,                  // rPPG SNR in dB (median of the final estimates)
     @SerialName("liveness_passed")
     val livenessPassed: Boolean? = null,
+    @SerialName("challenge_id")
+    val challengeId: String? = null,
+    @SerialName("challenge_passed")
+    val challengePassed: Boolean? = null,
+    /** Life certificate: average of the best few embeddings (L2-normalised, 192 values). */
+    @SerialName("face_embedding")
+    val faceEmbedding: List<Float>? = null,
+    /** Registration: average of the best 10–20 embeddings (L2-normalised, 192 values). */
+    @SerialName("reference_template")
+    val referenceTemplate: List<Float>? = null,
+    @SerialName("model_version")
+    val modelVersion: String? = null,
+    @SerialName("key_security_level")
+    val keySecurityLevel: String? = null,
+    val consent: Boolean? = null,
     @SerialName("frames_used")
     val framesUsed: Int? = null,
     @SerialName("app_version")
@@ -88,6 +104,8 @@ data class VerifyResponse(
     @SerialName("reason_code")
     val reasonCode: String? = null,
     val outcome: String? = null,
+    @SerialName("certificate_id")
+    val certificateId: Int? = null,
 )
 
 /**

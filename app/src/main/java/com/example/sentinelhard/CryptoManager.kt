@@ -1,8 +1,11 @@
 package com.example.sentinelhard
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -119,6 +122,33 @@ class CryptoManager {
         val certChain = keyStore.getCertificateChain(KEY_ALIAS) ?: return emptyList()
         return certChain.map { cert ->
             Base64.encodeToString(cert.encoded, Base64.NO_WRAP)
+        }
+    }
+
+    /**
+     * Where the signing key lives, for the signed payload (build-prompt §4.4):
+     * "STRONGBOX" (Titan M2 or another secure element), "TEE", "SOFTWARE" or "UNKNOWN".
+     * Android 12+ reports it exactly. Older versions only say whether the key is in
+     * secure hardware, so a StrongBox key is reported there as "TEE" (never overstated).
+     */
+    @Suppress("DEPRECATION") // KeyInfo.isInsideSecureHardware, used only below Android 12
+    fun keySecurityLevel(): String {
+        return try {
+            val key = keyStore.getKey(KEY_ALIAS, null) as? PrivateKey ?: return "UNKNOWN"
+            val info = KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+                .getKeySpec(key, KeyInfo::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                when (info.securityLevel) {
+                    KeyProperties.SECURITY_LEVEL_STRONGBOX -> "STRONGBOX"
+                    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "TEE"
+                    KeyProperties.SECURITY_LEVEL_SOFTWARE -> "SOFTWARE"
+                    else -> "UNKNOWN"
+                }
+            } else {
+                if (info.isInsideSecureHardware) "TEE" else "SOFTWARE"
+            }
+        } catch (e: Exception) {
+            "UNKNOWN"
         }
     }
 

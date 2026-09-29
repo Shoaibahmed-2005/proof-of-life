@@ -497,3 +497,35 @@ def test_multiple_faces_abort_is_rejected_but_not_counted(client, officer_header
     assert reason(phone.submit(auth)) == "MULTIPLE_FACES"
     bad = dict(auth, abort_reason="SOMETHING_ELSE")
     assert reason(phone.submit(bad)) == "INVALID_PAYLOAD"
+
+
+def test_app_aborts_and_early_failures_need_no_face_data(client, officer_headers):
+    """What the Milestone 4 app sends when it stops early: the rejection must reach the pipeline."""
+    phone = Phone(client)
+    p = register(client, officer_headers, phone, TEMPLATE)
+
+    # Abort with only the basics (no challenge / face fields): FACE_NOT_CAPTURED, not counted.
+    s = lc(client)
+    minimal = {k: v for k, v in phone.payload_for(s["qr_payload"]).items()
+               if k in ("session_id", "purpose", "nonce", "timestamp", "device_id", "consent",
+                        "key_security_level", "app_version", "model_version")}
+    r = phone.submit(dict(minimal, bpm=0.0, snr=-99.0, liveness_passed=False, abort_reason="FACE_NOT_CAPTURED"))
+    assert reason(r) == "FACE_NOT_CAPTURED", r.text
+
+    # No pulse, no face embedding: reported as NO_PULSE (counted toward freezing).
+    s = lc(client)
+    r = phone.submit(phone.payload_for(s["qr_payload"], liveness_passed=False, challenge_passed=False, snr=0.5))
+    assert reason(r) == "NO_PULSE", r.text
+
+    # Pulse ok, challenge failed, no embedding: CHALLENGE_FAILED.
+    s = lc(client)
+    r = phone.submit(phone.payload_for(s["qr_payload"], challenge_passed=False))
+    assert reason(r) == "CHALLENGE_FAILED", r.text
+
+    # Everything passed but no embedding: still refused as an invalid payload.
+    s = lc(client)
+    r = phone.submit(phone.payload_for(s["qr_payload"]))
+    assert reason(r) == "INVALID_PAYLOAD", r.text
+
+    pub = client.get("/api/v1/pensioners/lookup", params={"ppo_number": p["ppo_number"]}).json()
+    assert pub["status"] == "ACTIVE"  # two counted failures stay below the freeze limit

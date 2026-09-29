@@ -65,8 +65,9 @@ class BiometricPayload(BaseModel):
     key_security_level: Optional[KeyType] = None
     consent: Optional[bool] = None
     diagnostics: Optional[ScanDiagnostics] = None
-    # The app stopped the scan itself (e.g. more than one face in view).
-    abort_reason: Optional[Literal["MULTIPLE_FACES"]] = None
+    # The app stopped the scan itself: more than one face in view, or it could
+    # not capture enough clear face frames for the embedding.
+    abort_reason: Optional[Literal["MULTIPLE_FACES", "FACE_NOT_CAPTURED"]] = None
 
     @field_validator("timestamp")
     @classmethod
@@ -85,12 +86,18 @@ class BiometricPayload(BaseModel):
     def _required_for_purpose(self) -> "BiometricPayload":
         if self.purpose is SessionPurpose.AUTH:
             return self
-        required = ["nonce", "snr", "liveness_passed", "challenge_id", "challenge_passed",
-                    "frames_used", "app_version"]
-        if self.purpose is SessionPurpose.LIFE_CERTIFICATE:
-            required.append("face_embedding")
+        if self.abort_reason is not None:
+            # The app stopped the scan: only what identifies the attempt is needed,
+            # so the rejection still reaches the portal.
+            required = ["nonce"]
         else:
-            required.append("reference_template")
+            required = ["nonce", "snr", "liveness_passed", "challenge_id", "challenge_passed",
+                        "frames_used", "app_version"]
+            # No pulse or a failed challenge is rejected before the face is compared,
+            # so the face data is only required for an attempt that passed both.
+            if self.liveness_passed and self.challenge_passed:
+                required.append("face_embedding" if self.purpose is SessionPurpose.LIFE_CERTIFICATE
+                                else "reference_template")
         missing = [f for f in required if getattr(self, f) is None]
         if missing:
             raise ValueError(f"Missing fields for {self.purpose.value}: {', '.join(missing)}")

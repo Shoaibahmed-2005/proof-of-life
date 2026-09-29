@@ -150,12 +150,12 @@ Use **Practice scan** on the portal. Registration and life certificates also nee
 | # | Test | Steps | Expected result |
 |---|---|---|---|
 | 3.1 | Build | Section 0, step 3 | Builds. The APK is about **8–10 MB larger** (face model ~5 MB + LiteRT runtime). On app start, `SentinelFace` logs `Loaded mobilefacenet.tflite (5233552 bytes): input [1, 112, 112, 3] output [1, 192]`. |
-| 3.2 | Face box | Start a scan. | An **orange box around the whole face** stays aligned with the face on screen as you move. |
-| 3.3 | Skin areas inside the box | Watch the overlay. | The three green boxes (forehead, both cheeks) sit **inside** the orange face box and move with it. |
-| 3.4 | Two faces | A second person leans into the frame part-way through. | The scan **stops at once**. Phone: "Not verified: More than one face was in view…". Portal: red **Rejected** with the same reason. |
+| 3.2 | Face box | Start a scan. | A thin **white box around the whole face** stays aligned with the face on screen as you move. |
+| 3.3 | Skin areas inside the box | Tap **Diagnostics** (bottom right of the white card). | The three green boxes (forehead, both cheeks) appear **inside** the white face box and move with it. |
+| 3.4 | Two faces | A second person leans into the frame part-way through. | The scan **stops at once**. Phone: "Not accepted: More than one face was in view…". Portal: red **Rejected** with the same reason. |
 | 3.5 | Face swap | Person A starts the scan, then moves away while person B moves in within 2 s. | The measurement restarts ("Measuring…" and an empty ring again). `SentinelFace`: `Tracked face changed`. |
 | 3.6 | Face lost | Leave the frame for about 3 s. | Guidance "Face the camera"; the measurement restarts when you return. |
-| 3.7 | Embeddings run | Complete a scan with `logcat` running (section 7.2, tag `SentinelFace`). | Lines `embedding #n: q=… sharp=… luma=… eyes=…px yaw=… pitch=… in N ms`, a few per second (not every frame). At the end: `Face frames: N good of M; template built (192 values)` with **N ≥ 10**. Note the typical `in N ms` value. |
+| 3.7 | Embeddings run | Complete a scan with `logcat` running (section 7.2, tag `SentinelFace`). | Lines `embedding #n: q=… sharp=… luma=… eyes=…px yaw=… pitch=… in N ms`, a few per second (not every frame). At the end: `Face frames: N good of M; sending no face data (practice scan)` with **N ≥ 10** (registrations and life certificates send the template or embedding: tests 4.10–4.11). Note the typical `in N ms` value. |
 | 3.8 | Diagnostics readout | Tap Diagnostics during a scan. | The `face frames: N good` count rises during the scan. |
 | 3.9 | Poor pose | Scan while looking clearly sideways, or with the phone far below your face. | Fewer good face frames (the quality filter rejects them). Guidance "Move closer" if the face is small. |
 | 3.10 | Performance | Watch during a scan. | The preview stays smooth, and the diagnostics fps doesn't drop by more than a few frames compared with before. The phone doesn't get hot within 30 s. |
@@ -165,21 +165,27 @@ Use **Practice scan** on the portal. Registration and life certificates also nee
 
 ## 3. Milestone 4: Random challenge + new app screens + extended payload
 
+The app now accepts all three QR codes: **Practice scan** (no challenge), **Register Pensioner** (officer) and **Submit Life Certificate**. Keep `adb logcat` running with the tags in section 7.2 (`SentinelChallenge` is new).
+
 | # | Test | Steps | Expected result |
 |---|---|---|---|
-| 4.1 | Build | Section 0, step 3 | Builds. |
-| 4.2 | Four screens | Launch the app. | **Scan QR → Consent → Face Scan → Result**, in orange/white styling with large text. There's no debug menu. |
-| 4.3 | Consent | Scan a QR code. | The consent screen appears before the camera starts. Declining returns to Scan QR. |
-| 4.4 | Challenge appears | Start a scan. | Part-way through, a big prompt appears: "Blink twice now", "Turn your head left" or "Turn your head right". The portal shows the same challenge. |
-| 4.5 | Challenge passed | Do what the prompt says. | It's marked done, and the scan finishes with a pass. |
-| 4.6 | Challenge ignored | Don't respond to the prompt. | After the time limit: **"Challenge failed"**, and the result is rejected. |
-| 4.7 | Wrong action | For "turn left", turn right instead. | Rejected with "Challenge failed". |
-| 4.8 | Challenge is random | Run 5 scans. | You get a mix of challenges. |
-| 4.9 | Key type | Run one scan with `logcat` running. | `SentinelHard` logs `key_security_level=STRONGBOX` on the Pixel 7. |
-| 4.10 | Result reasons | Trigger a pass, a challenge fail and a photo fail. | The result screen shows approved or rejected **with the reason**, and the portal shows the same thing. |
-| 4.11 | Live portal steps | Watch the laptop during a scan. | The portal steps advance live: *Waiting for scan → Measuring pulse → Challenge → Face match → Result*. |
-
----
+| 4.1 | Build + unit tests | Section 0, step 3, then `./gradlew testDebugUnitTest` | Builds; the unit tests pass, including the 8 `ChallengeVerifierTest` tests (blink counting, turn direction, time limit). The app shows version **4.0-challenge**. |
+| 4.2 | Four screens | Launch the app and do a practice scan. | **Scan QR** (white page, orange "Scan QR code" button, then the camera with an orange frame) → **Consent** (white page, large text, "I agree, start the scan") → **Face Scan** (dark camera view, big face-guide circle and progress ring, prompt at the top, pulse and waveform in a white card) → **Result** (big icon, one-line outcome, reason, "Done"). |
+| 4.3 | Consent | Scan a QR code, then tap **Cancel** on the consent screen. | Back to the start; the camera never turned on. Scan again and agree: the face scan starts. |
+| 4.4 | Guide circle colour | Watch the circle during a life-certificate scan. | **Orange** while measuring and during the challenge; **green** only after the pulse is steady **and** the challenge is passed. |
+| 4.5 | Challenge appears | Portal: Submit Life Certificate (registered pensioner) → scan. | After the pulse is steady (about 10–15 s), a big prompt appears: "Blink twice now", "← Turn your head to your left" or "Turn your head to your right →", with seconds left. The portal's **Challenge** step shows the same action at the same moment. `SentinelChallenge`: `Challenge issued: …`. |
+| 4.6 | Turn direction | Get a **Turn left** challenge (repeat until you get one) and turn your head to **your own** left. | It passes within a second. **If it only passes when you turn right**, the sign is reversed on this phone: set `LEFT_YAW_SIGN = -1f` in `face/ChallengeVerifier.kt`, rebuild, and report it. Turn the other way to see the "Other way" hint. |
+| 4.7 | Blink | Get a **Blink twice** challenge and blink twice, normally. | The detail line counts "1 of 2", "2 of 2", then it passes. Half-closing your eyes doesn't count. |
+| 4.8 | Challenge ignored | Don't respond to the prompt. | After the time limit (QR `challenge.timeout_s`, default 8 s): phone **Not accepted: Challenge failed…**; portal red **Rejected** at the Challenge step. `SentinelChallenge`: `Challenge failed: … (time limit: …)`. |
+| 4.9 | Challenge is random | Run 5 life-certificate or registration QR codes. | A mix of the three actions (chosen by the backend, not the phone). |
+| 4.10 | Registration | Officer: Register Pensioner → QR → scan with the consent, pulse and challenge. | Phone: **Face registered** ("The officer will now approve…"). Portal: **Face captured**, then the officer clicks **Approve** → Active. `SentinelFace`: `sending reference template (192 values, best 15 frames)`. |
+| 4.11 | Life certificate | Submit Life Certificate with the registered person. | Phone: **Life certificate issued**. Portal: certificate card with score. `SentinelFace`: `sending probe embedding (192 values, best 5 frames)`. |
+| 4.12 | Key type in the payload | Look at `SentinelHard` at app start. | `Signing key: STRONGBOX` on the Pixel 7 (TEE on phones without StrongBox; on Android 11 and older a StrongBox key shows as TEE). The portal's Records → pensioner → device shows the same key type. |
+| 4.13 | Face lost during the challenge | During the challenge, move out of the frame for 3 s. | The scan goes back to measuring the pulse (ring restarts), then asks for the challenge again. |
+| 4.14 | Face not captured | Hard to trigger on purpose. If it happens (very dark, or the face always turned away): | Phone: **Not accepted: The face could not be captured clearly…**; not counted toward freezing. |
+| 4.15 | Result reasons | Trigger a pass, a challenge fail and a photo (no pulse). | Each result screen shows the outcome **and the reason**, and the portal shows the same at the same time. |
+| 4.16 | Live portal steps | Watch the laptop during a life-certificate scan. | *Waiting for scan → Measuring pulse → Challenge → Face match → Result* advance live. |
+| 4.17 | Timing | Note the time from "I agree" to the result screen for 3 good scans. | Pulse phase as in section D, plus a few seconds for the challenge. Report the times. |
 
 ## 4. Milestones 5–7 (backend and portal; phone used end to end)
 There are no Android code changes in these milestones, so the app doesn't need to be rebuilt unless a note says otherwise. Run section 5 after M7.

@@ -24,23 +24,13 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -54,12 +44,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size as ComposeSize
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -68,21 +56,32 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.example.sentinelhard.camera.CameraTuning
 import com.example.sentinelhard.camera.QrCodeAnalyzer
-import com.example.sentinelhard.models.BiometricPayload
-import com.example.sentinelhard.models.ScanDiagnosticsPayload
-import com.example.sentinelhard.models.VerifyRequest
-import com.example.sentinelhard.network.ApiClient
-import com.example.sentinelhard.network.QrPayload
+import com.example.sentinelhard.face.ChallengeVerifier
 import com.example.sentinelhard.face.FaceCapture
 import com.example.sentinelhard.face.FaceEmbedder
 import com.example.sentinelhard.face.FaceNative
+import com.example.sentinelhard.models.BiometricPayload
+import com.example.sentinelhard.models.ScanDiagnosticsPayload
+import com.example.sentinelhard.models.VerifyRequest
+import com.example.sentinelhard.models.VerifyResponse
+import com.example.sentinelhard.network.ApiClient
+import com.example.sentinelhard.network.QrPayload
 import com.example.sentinelhard.rppg.FaceRois
 import com.example.sentinelhard.rppg.GateSettings
 import com.example.sentinelhard.rppg.RppgConfig
 import com.example.sentinelhard.rppg.RppgNative
 import com.example.sentinelhard.rppg.RppgResult
 import com.example.sentinelhard.rppg.ScanDiagnostics
+import com.example.sentinelhard.ui.BusyScreen
+import com.example.sentinelhard.ui.ConsentScreen
+import com.example.sentinelhard.ui.FaceScanHud
+import com.example.sentinelhard.ui.Jst
+import com.example.sentinelhard.ui.QrScannerOverlay
+import com.example.sentinelhard.ui.ResultKind
+import com.example.sentinelhard.ui.ResultScreen
+import com.example.sentinelhard.ui.WelcomeScreen
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
@@ -97,18 +96,36 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.ceil
 
-/** App flow: Home → Scan QR → (connect) → Measuring → Submitting → Result. */
+/**
+ * The app's four screens (build-prompt §4.6): Scan QR → Consent → Face Scan → Result.
+ * Welcome/Connecting/Submitting are the start and the waits of those screens.
+ */
 sealed class ScanState {
-    object Home : ScanState()
+    object Welcome : ScanState()
     object ScanQr : ScanState()
     data class Connecting(val qr: QrPayload) : ScanState()
+    data class Consent(val qr: QrPayload, val baseUrl: String) : ScanState()
     data class Measuring(val qr: QrPayload, val baseUrl: String) : ScanState()
     object Submitting : ScanState()
-    data class Result(val success: Boolean, val title: String, val message: String?) : ScanState()
+    data class Result(val kind: ResultKind, val title: String, val message: String?) : ScanState()
 }
 
+/**
+ * Steps inside the face scan: stable pulse first, then the random challenge,
+ * then (if needed) a moment more to collect enough clear face frames.
+ * Practice scans (AUTH) have no challenge and submit on the stable pulse.
+ */
+enum class ScanPhase { PULSE, CHALLENGE, CAPTURE, DONE }
+
 private enum class CameraMode { QR, FACE }
+
+/** What the phone concluded; the backend makes the decision. */
+private data class Verdict(val livenessPassed: Boolean, val challengePassed: Boolean?, val abortReason: String? = null)
+
+/** Challenge progress for the screen. */
+private data class ChallengeUi(val type: String, val secondsLeft: Int, val blinks: Int, val hint: String?, val yaw: Float)
 
 class MainActivity : AppCompatActivity() {
 
@@ -116,12 +133,15 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "SentinelHard"
         private const val TAG_DSP = "SentinelDSP"
         private const val TAG_TELEMETRY = "SentinelTelemetry"
-        private val GREEN = Color(0xFF00FF66)
-        private val AMBER = Color(0xFFFFC107)
+        private const val TAG_CHALLENGE = "SentinelChallenge"
+        private val ROI_GREEN = Color(0xFF00FF66)
+
+        /** After the challenge, wait at most this long for enough clear face frames. */
+        private const val CAPTURE_TIMEOUT_SEC = 6.0
     }
 
     // ── UI state (Compose) ──────────────────────────────────────────────
-    private val scanState = mutableStateOf<ScanState>(ScanState.Home)
+    private val scanState = mutableStateOf<ScanState>(ScanState.Welcome)
     private val rppgState = mutableStateOf(RppgResult.EMPTY)
     private val faceVisibleState = mutableStateOf(false)
     private val roiOverlayState = mutableStateOf<List<RectF>>(emptyList())
@@ -131,6 +151,9 @@ class MainActivity : AppCompatActivity() {
     private val guidanceState = mutableStateOf<String?>(null)
     private val faceBoxState = mutableStateOf<RectF?>(null)              // whole face, upright coords
     private val faceFramesState = mutableIntStateOf(0)                   // good embedding frames so far
+    private val phaseState = mutableStateOf(ScanPhase.PULSE)
+    private val challengeUiState = mutableStateOf<ChallengeUi?>(null)
+    private val verifiedState = mutableStateOf(false)                    // pulse + challenge passed
 
     // ── Measurement state (camera thread + ML Kit callbacks) ────────────
     @Volatile private var currentRois: IntArray? = null
@@ -156,9 +179,18 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var trackedFaceId: Int? = null
     private var detectionCount = 0
 
+    // Challenge and phases (Milestone 4)
+    private val phaseLock = Any()
+    @Volatile private var phase = ScanPhase.PULSE
+    @Volatile private var activeQr: QrPayload? = null
+    @Volatile private var challenge: ChallengeVerifier? = null
+    @Volatile private var stableResult: RppgResult? = null
+    @Volatile private var captureStartedSec = 0.0
+
     private val cryptoManager = CryptoManager()
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val telemetryStreamer = TelemetryStreamer()
+    private val lenientJson = Json { ignoreUnknownKeys = true }
 
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
@@ -178,7 +210,7 @@ class MainActivity : AppCompatActivity() {
             scanState.value = ScanState.ScanQr
         } else {
             Log.e(TAG, "Camera permission denied")
-            scanState.value = ScanState.Result(false, "Camera permission needed",
+            scanState.value = ScanState.Result(ResultKind.FAILURE, "Camera permission needed",
                 "Allow camera access to scan the QR code and measure your pulse.")
         }
     }
@@ -203,6 +235,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.Default) {
             try {
                 cryptoManager.generateHardwareKey()
+                Log.i(TAG, "Signing key: ${cryptoManager.keySecurityLevel()}")
             } catch (e: Exception) {
                 Log.e(TAG, "Key generation failed", e)
             }
@@ -210,24 +243,28 @@ class MainActivity : AppCompatActivity() {
 
         setContent {
             MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
-                    val state by scanState
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        when (val s = state) {
-                            is ScanState.Home -> HomeScreen(onScan = { startQrScan() })
-                            is ScanState.ScanQr -> {
-                                key(CameraMode.QR) { CameraPreview(CameraMode.QR) }
-                                BannerText("Point the camera at the QR code on the portal")
-                            }
-                            is ScanState.Connecting -> BusyScreen("Connecting to the portal…")
-                            is ScanState.Measuring -> {
-                                key(CameraMode.FACE) { CameraPreview(CameraMode.FACE) }
-                                RoiOverlay()
-                                MeasuringHud()
-                            }
-                            is ScanState.Submitting -> BusyScreen("Sending signed result…")
-                            is ScanState.Result -> ResultScreen(s)
+                val state by scanState
+                val dark = state is ScanState.ScanQr || state is ScanState.Measuring
+                Box(Modifier.fillMaxSize().background(if (dark) Color.Black else Jst.Surface)) {
+                    when (val s = state) {
+                        is ScanState.Welcome -> WelcomeScreen(onScan = { startQrScan() })
+                        is ScanState.ScanQr -> {
+                            key(CameraMode.QR) { CameraPreview(CameraMode.QR) }
+                            QrScannerOverlay(onCancel = { scanState.value = ScanState.Welcome })
                         }
+                        is ScanState.Connecting -> BusyScreen("Connecting to the portal…")
+                        is ScanState.Consent -> ConsentScreen(
+                            title = consentTitle(s.qr), points = consentPoints(s.qr),
+                            onAgree = { onConsentAgreed(s) },
+                            onCancel = { scanState.value = ScanState.Welcome },
+                        )
+                        is ScanState.Measuring -> {
+                            key(CameraMode.FACE) { CameraPreview(CameraMode.FACE) }
+                            FaceScanScreen(s.qr)
+                        }
+                        is ScanState.Submitting -> BusyScreen("Sending your signed result…")
+                        is ScanState.Result -> ResultScreen(s.kind, s.title, s.message,
+                            onDone = { scanState.value = ScanState.Welcome })
                     }
                 }
             }
@@ -250,16 +287,15 @@ class MainActivity : AppCompatActivity() {
         val qr = QrPayload.parse(raw)
         if (qr == null) {
             Log.w(TAG, "Not a session QR code: $raw")
-            scanState.value = ScanState.Result(false, "Not a portal QR code",
+            scanState.value = ScanState.Result(ResultKind.FAILURE, "Not a portal QR code",
                 "Please scan the QR code shown on the Jeevan Suraksha portal.")
             return
         }
         Log.i(TAG, "QR scanned: session=${qr.sessionId} purpose=${qr.purpose} base_url=${qr.baseUrl} " +
-            "min_snr_db=${qr.minSnrDb}")
-        if (!qr.isAuth) {
-            scanState.value = ScanState.Result(false, "App update needed",
-                "This QR code is for ${qr.purpose.replace('_', ' ').lowercase()}. " +
-                    "Face registration and life certificates arrive in the next app update.")
+            "challenge=${qr.challengeType} (${qr.challengeTimeoutSec}s) min_snr_db=${qr.minSnrDb}")
+        val problem = unsupportedReason(qr)
+        if (problem != null) {
+            scanState.value = ScanState.Result(ResultKind.FAILURE, "App update needed", problem)
             return
         }
         scanState.value = ScanState.Connecting(qr)
@@ -267,17 +303,61 @@ class MainActivity : AppCompatActivity() {
             val probe = ApiClient.resolveReachableBaseUrl(qr.baseUrl)
             val baseUrl = probe.baseUrl
             if (baseUrl == null) {
-                scanState.value = ScanState.Result(false, "Can't reach the laptop",
+                scanState.value = ScanState.Result(ResultKind.FAILURE, "Can't reach the laptop",
                     probe.describeFailure() + "\n\nPhone and laptop must be on the same Wi-Fi, with port 8000 " +
                         "allowed in Windows Firewall. Over USB: adb reverse tcp:8000 tcp:8000")
             } else {
-                startMeasuring(qr, baseUrl)
+                scanState.value = ScanState.Consent(qr, baseUrl)
             }
         }
     }
 
+    private fun unsupportedReason(qr: QrPayload): String? {
+        val known = setOf(QrPayload.PURPOSE_AUTH, QrPayload.PURPOSE_ENROLLMENT, QrPayload.PURPOSE_LIFE_CERTIFICATE)
+        return when {
+            qr.purpose !in known ->
+                "This QR code is for \"${qr.purpose}\", which this app version does not support."
+            !qr.isAuth && qr.challengeId == null ->
+                "This QR code has no challenge. Please refresh the QR code on the portal and scan again."
+            !qr.isAuth && !ChallengeVerifier.SUPPORTED.contains(qr.challengeType ?: "") ->
+                "The portal asked for an action (${qr.challengeType}) this app does not know. Please update the app."
+            else -> null
+        }
+    }
+
+    private fun consentTitle(qr: QrPayload): String = when (qr.purpose) {
+        QrPayload.PURPOSE_ENROLLMENT -> "Register your face"
+        QrPayload.PURPOSE_LIFE_CERTIFICATE -> "Submit your life certificate"
+        else -> "Practice scan"
+    }
+
+    private fun consentPoints(qr: QrPayload): List<String> = buildList {
+        add("The camera measures your pulse from tiny colour changes in your face, to check that a real person is present.")
+        when (qr.purpose) {
+            QrPayload.PURPOSE_ENROLLMENT -> add("Your face is turned into a code of numbers (not a photo). " +
+                "The pension office keeps it encrypted, to recognise you next year.")
+            QrPayload.PURPOSE_LIFE_CERTIFICATE -> add("Your face is turned into a code of numbers (not a photo) " +
+                "and compared only with your own registered code.")
+            else -> add("This is only a practice. Nothing is kept.")
+        }
+        if (!qr.isAuth) add("You will be asked to do one simple action, such as blinking twice.")
+        add("No photos or videos are saved or sent. Camera frames are deleted straight after they are measured.")
+        add("The result is signed by this phone's security chip and sent to the portal.")
+    }
+
+    private fun onConsentAgreed(s: ScanState.Consent) {
+        if (!s.qr.isAuth && faceEmbedder == null) {
+            scanState.value = ScanState.Result(ResultKind.FAILURE, "Face model not ready",
+                "The face-recognition model could not be loaded. Close and reopen the app, then scan the QR code again.")
+            return
+        }
+        startMeasuring(s.qr, s.baseUrl)
+    }
+
     private fun startMeasuring(qr: QrPayload, baseUrl: String) {
         resetMeasurement()
+        activeQr = qr
+        challenge = newChallenge(qr)
         gates = GateSettings.from(qr)
         Log.i(ScanDiagnostics.TAG, "Gates: min_snr=${gates.minSnrDb} dB window=${gates.windowSec}s " +
             "stable=${gates.stableCount} within +/-${gates.stableToleranceBpm} BPM timeout=${gates.timeoutSec}s")
@@ -285,6 +365,17 @@ class MainActivity : AppCompatActivity() {
         telemetryStreamer.connect(baseUrl, qr.sessionId, qr.nonce)
         telemetryStreamer.send("scan_started")
         scanState.value = ScanState.Measuring(qr, baseUrl)
+    }
+
+    private fun newChallenge(qr: QrPayload?): ChallengeVerifier? {
+        if (qr == null || qr.isAuth) return null
+        val type = qr.challengeType ?: return null
+        return ChallengeVerifier(type, qr.challengeTimeoutSec?.toDouble() ?: ChallengeVerifier.DEFAULT_TIMEOUT_SEC)
+    }
+
+    private fun setPhase(p: ScanPhase) {
+        phase = p
+        phaseState.value = p
     }
 
     /** Clears everything from a previous scan so each scan starts from zero. */
@@ -310,6 +401,11 @@ class MainActivity : AppCompatActivity() {
         faceBoxState.value = null
         trackedFaceId = null
         detectionCount = 0
+        setPhase(ScanPhase.PULSE)
+        challengeUiState.value = null
+        verifiedState.value = false
+        stableResult = null
+        captureStartedSec = 0.0
     }
 
     private fun finishScan(result: ScanState.Result) {
@@ -398,7 +494,7 @@ class MainActivity : AppCompatActivity() {
         CameraTuning.lockExposure(this, camera) { ok ->
             diagnostics.aeLocked = ok
             Log.i(ScanDiagnostics.TAG, "Exposure/white-balance lock: ${if (ok) "locked" else "not supported"}")
-            if (ok && !submitted.get()) {
+            if (ok && !submitted.get() && phase == ScanPhase.PULSE) {
                 // Samples from before the lock contain exposure changes: start the window afresh.
                 RppgNative.nativeReset()
                 firstFaceSec = lastFaceSeenSec
@@ -411,7 +507,7 @@ class MainActivity : AppCompatActivity() {
      * (C++), then run MobileFaceNet on the embedding thread. Called from the ML Kit
      * success listener, while the image is still open.
      */
-    private fun maybeEmbed(imageProxy: ImageProxy, face: com.google.mlkit.vision.face.Face, rotation: Int, width: Int, height: Int) {
+    private fun maybeEmbed(imageProxy: ImageProxy, face: Face, rotation: Int, width: Int, height: Int) {
         detectionCount++
         val embedder = faceEmbedder ?: return
         if (detectionCount % 2 != 0 || embedBusy) return
@@ -446,10 +542,10 @@ class MainActivity : AppCompatActivity() {
 
     /** More than one face in view: stop the scan and report it (signed), so the portal is told too. */
     private fun onMultipleFaces(state: ScanState.Measuring, count: Int) {
-        if (!submitted.compareAndSet(false, true)) return
+        if (submitted.get()) return
         Log.w(FaceEmbedder.TAG, "$count faces in view: scan stopped")
         telemetryStreamer.send("multiple_faces", mapOf("message" to "$count faces in view"))
-        runOnUiThread { submitResult(state, rppgState.value, livenessPassed = false, abortReason = "MULTIPLE_FACES") }
+        submit(state, rppgState.value, Verdict(false, challenge?.let { false }, "MULTIPLE_FACES"))
     }
 
     /** Plain-language hint when conditions make the pulse hard to measure. */
@@ -482,6 +578,15 @@ class MainActivity : AppCompatActivity() {
         val width = imageProxy.width
         val height = imageProxy.height
 
+        // 0. Time limits of the challenge and the face capture (also when no face is found).
+        when (phase) {
+            ScanPhase.CHALLENGE -> challenge?.let { c ->
+                if (c.onTick(t) == ChallengeVerifier.Status.FAILED) onChallengeFailed(state, c) else publishChallengeUi(c, t)
+            }
+            ScanPhase.CAPTURE -> maybeFinishCapture(state, t)
+            else -> {}
+        }
+
         // 1. rPPG on every frame, using the most recent face ROIs.
         val rois = currentRois
         if (rois != null) {
@@ -506,9 +611,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Face detection on every Nth frame (ML Kit keeps the image until it finishes).
+        // 2. Face detection on every Nth frame (every frame during the challenge, so a
+        //    blink is not missed). ML Kit keeps the image until it finishes.
         frameCounter++
-        if (frameCounter % RppgConfig.FACE_DETECTION_INTERVAL != 0 || isDetectingFace) {
+        val interval = if (phase == ScanPhase.CHALLENGE) 1 else RppgConfig.FACE_DETECTION_INTERVAL
+        if (frameCounter % interval != 0 || isDetectingFace) {
             imageProxy.close()
             return
         }
@@ -521,8 +628,8 @@ class MainActivity : AppCompatActivity() {
                     return@addOnSuccessListener
                 }
                 val face = faces.firstOrNull()
-                // The same tracked face must provide the pulse and the identity: if ML Kit
-                // starts tracking a different face, everything measured so far is discarded.
+                // The same tracked face must provide the pulse, the challenge and the identity:
+                // if ML Kit starts tracking a different face, everything measured so far is discarded.
                 val id = face?.trackingId
                 if (face != null && id != null) {
                     val previous = trackedFaceId
@@ -555,6 +662,7 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         AndroidSize(width, height)
                     }
+                    if (phase == ScanPhase.CHALLENGE) onChallengeSample(state, face, t)
                 } else {
                     faceVisibleState.value = false
                 }
@@ -580,6 +688,18 @@ class MainActivity : AppCompatActivity() {
         faceFramesState.intValue = 0
         faceBoxState.value = null
         guidanceState.value = "Face the camera"
+        // The pulse, the challenge and the face frames must all come from one face:
+        // losing it during the challenge starts the whole scan again.
+        synchronized(phaseLock) {
+            if (phase == ScanPhase.CHALLENGE || phase == ScanPhase.CAPTURE) {
+                Log.w(TAG_CHALLENGE, "Face lost during the ${phase.name.lowercase()} step: back to measuring the pulse")
+                setPhase(ScanPhase.PULSE)
+                challenge = newChallenge(activeQr)
+                stableResult = null
+                challengeUiState.value = null
+                verifiedState.value = false
+            }
+        }
     }
 
     private fun onRppgResult(result: RppgResult, t: Double, state: ScanState.Measuring) {
@@ -592,60 +712,176 @@ class MainActivity : AppCompatActivity() {
                 "progress" to result.windowFill, "stable" to result.stable,
             ))
         }
-        if (result.stable && submitted.compareAndSet(false, true)) {
-            Log.i(TAG_DSP, "Stable pulse: %.1f BPM, SNR %.1f dB → submitting".format(result.bpm, result.medianSnrDb))
-            telemetryStreamer.send("stable_reading", mapOf("bpm" to result.bpm, "snr" to result.medianSnrDb))
-            runOnUiThread { submitResult(state, result, livenessPassed = true) }
+        if (phase != ScanPhase.PULSE || submitted.get()) return
+        if (result.stable) {
+            onPulseStable(result, t, state)
             return
         }
         val started = firstFaceSec
-        if (started != null && t - started > gates.timeoutSec && submitted.compareAndSet(false, true)) {
+        if (started != null && t - started > gates.timeoutSec) {
             Log.w(TAG_DSP, "No stable pulse within ${gates.timeoutSec}s (last SNR %.1f dB) → reporting no pulse"
                 .format(result.medianSnrDb))
-            runOnUiThread { submitResult(state, result, livenessPassed = false) }
+            submit(state, result, Verdict(false, challenge?.let { false }))
         }
     }
 
-    // ── Signing and submission ──────────────────────────────────────────
+    // ── Challenge and face capture (Milestone 4) ────────────────────────
 
-    private fun submitResult(
-        state: ScanState.Measuring, result: RppgResult, livenessPassed: Boolean, abortReason: String? = null,
-    ) {
-        scanState.value = ScanState.Submitting
-        lifecycleScope.launch {
-            try {
-                val diag = diagnostics.summary(abortReason ?: if (livenessPassed) "stable" else "timeout", result)
-                val request = withContext(Dispatchers.Default) {
-                    buildSignedRequest(state.qr, result, livenessPassed, diag, abortReason)
-                }
-                val response = ApiClient.service(state.baseUrl).verifyBiometrics(request)
-                val body = response.body()
-                val outcome = when {
-                    response.isSuccessful && body?.status == "ACCESS_GRANTED" ->
-                        ScanState.Result(true, "Verified", "Pulse %.0f BPM. The portal has been updated.".format(result.bpm))
-                    body != null ->
-                        ScanState.Result(false, "Not verified", body.reason ?: "Verification failed")
-                    else ->
-                        ScanState.Result(false, "Not verified", "Server error ${response.code()}")
-                }
-                Log.i(TAG, "Verify response: ${response.code()} ${body?.status} ${body?.reasonCode ?: ""}")
-                finishScan(outcome)
-            } catch (e: Exception) {
-                Log.e(TAG, "Submission failed", e)
-                finishScan(ScanState.Result(false, "Could not send the result", e.message ?: "Network error"))
+    /** Stable pulse: practice scans submit now; the others get the random challenge. */
+    private fun onPulseStable(result: RppgResult, t: Double, state: ScanState.Measuring) {
+        Log.i(TAG_DSP, "Stable pulse: %.1f BPM, SNR %.1f dB".format(result.bpm, result.medianSnrDb))
+        stableResult = result
+        telemetryStreamer.send("stable_reading", mapOf("bpm" to result.bpm, "snr" to result.medianSnrDb))
+        val c = challenge
+        if (c == null) {
+            verifiedState.value = true
+            submit(state, result, Verdict(true, null))
+            return
+        }
+        synchronized(phaseLock) {
+            if (phase != ScanPhase.PULSE) return
+            setPhase(ScanPhase.CHALLENGE)
+        }
+        c.start(t)
+        Log.i(TAG_CHALLENGE, "Challenge issued: ${c.type} (time limit ${state.qr.challengeTimeoutSec ?: ChallengeVerifier.DEFAULT_TIMEOUT_SEC.toInt()} s)")
+        telemetryStreamer.send("challenge_issued", mapOf("challenge_type" to c.type))
+        publishChallengeUi(c, t)
+    }
+
+    private fun onChallengeSample(state: ScanState.Measuring, face: Face, t: Double) {
+        val c = challenge ?: return
+        when (c.onFace(t, face.headEulerAngleY, face.leftEyeOpenProbability, face.rightEyeOpenProbability)) {
+            ChallengeVerifier.Status.PASSED -> onChallengePassed(state, c, t)
+            ChallengeVerifier.Status.FAILED -> onChallengeFailed(state, c)
+            ChallengeVerifier.Status.RUNNING -> publishChallengeUi(c, t)
+        }
+    }
+
+    private fun publishChallengeUi(c: ChallengeVerifier, t: Double) {
+        challengeUiState.value = ChallengeUi(c.type, ceil(c.remainingSec(t)).toInt(), c.blinks, c.hint, c.lastYaw)
+    }
+
+    private fun onChallengePassed(state: ScanState.Measuring, c: ChallengeVerifier, t: Double) {
+        synchronized(phaseLock) {
+            if (phase != ScanPhase.CHALLENGE) return
+            setPhase(ScanPhase.CAPTURE)
+            captureStartedSec = t
+        }
+        Log.i(TAG_CHALLENGE, "Challenge passed: ${c.type} (blinks=${c.blinks}, yaw=%.0f°)".format(c.lastYaw))
+        telemetryStreamer.send("challenge_passed", mapOf("challenge_type" to c.type))
+        challengeUiState.value = null
+        verifiedState.value = true
+        maybeFinishCapture(state, t)
+    }
+
+    private fun onChallengeFailed(state: ScanState.Measuring, c: ChallengeVerifier) {
+        synchronized(phaseLock) {
+            if (phase != ScanPhase.CHALLENGE) return
+            setPhase(ScanPhase.DONE)
+        }
+        Log.w(TAG_CHALLENGE, "Challenge failed: ${c.type} (${c.failDetail})")
+        telemetryStreamer.send("challenge_failed", mapOf("challenge_type" to c.type, "message" to (c.failDetail ?: "")))
+        submit(state, stableResult ?: rppgState.value, Verdict(true, false))
+    }
+
+    /** After the challenge: submit once there are enough clear face frames (usually at once). */
+    private fun maybeFinishCapture(state: ScanState.Measuring, t: Double) {
+        if (phase != ScanPhase.CAPTURE) return
+        val needed = if (state.qr.purpose == QrPayload.PURPOSE_ENROLLMENT) FaceCapture.ENROLL_MIN else FaceCapture.PROBE_MIN
+        val result = stableResult ?: rppgState.value
+        when {
+            faceCapture.goodFrames() >= needed -> submit(state, result, Verdict(true, true))
+            t - captureStartedSec > CAPTURE_TIMEOUT_SEC -> {
+                Log.w(FaceEmbedder.TAG, "Only ${faceCapture.goodFrames()} clear face frames of $needed needed: face not captured")
+                submit(state, result, Verdict(true, true, "FACE_NOT_CAPTURED"))
             }
         }
     }
 
+    /** Ends the scan once (from any thread) and sends the signed result. */
+    private fun submit(state: ScanState.Measuring, result: RppgResult, verdict: Verdict) {
+        if (!submitted.compareAndSet(false, true)) return
+        setPhase(ScanPhase.DONE)
+        runOnUiThread { submitResult(state, result, verdict) }
+    }
+
+    // ── Signing and submission ──────────────────────────────────────────
+
+    private fun submitResult(state: ScanState.Measuring, result: RppgResult, verdict: Verdict) {
+        scanState.value = ScanState.Submitting
+        lifecycleScope.launch {
+            try {
+                val hint = verdict.abortReason?.lowercase() ?: when {
+                    !verdict.livenessPassed -> "timeout"
+                    verdict.challengePassed == false -> "challenge_failed"
+                    else -> "stable"
+                }
+                val diag = diagnostics.summary(hint, result)
+                val request = withContext(Dispatchers.Default) { buildSignedRequest(state.qr, result, verdict, diag) }
+                val response = ApiClient.service(state.baseUrl).verifyBiometrics(request)
+                val body = response.body() ?: parseErrorBody(response.errorBody()?.string())
+                Log.i(TAG, "Verify response: ${response.code()} ${body?.status} ${body?.outcome ?: ""} ${body?.reasonCode ?: ""}")
+                finishScan(resultFor(body, response.code(), result))
+            } catch (e: Exception) {
+                Log.e(TAG, "Submission failed", e)
+                finishScan(ScanState.Result(ResultKind.FAILURE, "Could not send the result",
+                    (e.message ?: "Network error") + "\n\nCheck the Wi-Fi and scan a new QR code."))
+            }
+        }
+    }
+
+    private fun parseErrorBody(text: String?): VerifyResponse? = try {
+        text?.let { lenientJson.decodeFromString(VerifyResponse.serializer(), it) }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Result screen text (build-prompt §4.6: approved, under review or rejected, with the reason). */
+    private fun resultFor(body: VerifyResponse?, code: Int, result: RppgResult): ScanState.Result = when {
+        body == null -> ScanState.Result(ResultKind.FAILURE, "Something went wrong",
+            "The server answered with error $code. Please scan a new QR code and try again.")
+        body.outcome == "ISSUED" -> ScanState.Result(ResultKind.SUCCESS, "Life certificate issued",
+            "Your pension continues. The portal on the laptop now shows your certificate.")
+        body.outcome == "UNDER_REVIEW" -> ScanState.Result(ResultKind.REVIEW, "Sent for officer review",
+            (body.reason ?: "An officer will check your scan.") + "\n\nYou don't need to do anything now.")
+        body.outcome == "CAPTURED" -> ScanState.Result(ResultKind.SUCCESS, "Face registered",
+            "The officer will now approve your registration on the portal.")
+        body.status == "ACCESS_GRANTED" -> ScanState.Result(ResultKind.SUCCESS, "Practice scan passed",
+            "Pulse %.0f BPM. Your phone is ready for the real scan.".format(result.bpm))
+        else -> ScanState.Result(ResultKind.FAILURE, "Not accepted", body.reason ?: "Verification failed")
+    }
+
+    private fun finite(v: Double, fallback: Double) = if (v.isFinite()) v else fallback
+
     private fun buildSignedRequest(
-        qr: QrPayload, result: RppgResult, livenessPassed: Boolean, diag: ScanDiagnosticsPayload,
-        abortReason: String? = null,
+        qr: QrPayload, result: RppgResult, verdict: Verdict, diag: ScanDiagnosticsPayload,
     ): VerifyRequest {
-        // Milestone 3: embeddings are collected on every scan; logged here so the face path
-        // can be checked on the phone. Milestone 4 puts them into the signed payload.
-        val template = faceCapture.buildTemplate()
-        Log.i(FaceEmbedder.TAG, "Face frames: ${faceCapture.goodFrames()} good of ${faceCapture.framesSeen}; " +
-            "template ${if (template != null) "built (${template.size} values)" else "not enough good frames"}")
+        val enrollment = qr.purpose == QrPayload.PURPOSE_ENROLLMENT
+        val lifeCertificate = qr.purpose == QrPayload.PURPOSE_LIFE_CERTIFICATE
+        var abortReason = verdict.abortReason
+        var template: FloatArray? = null
+        var probe: FloatArray? = null
+        if (abortReason == null) {
+            if (enrollment) template = faceCapture.buildTemplate()
+            if (lifeCertificate) probe = faceCapture.buildProbe()
+            val passed = verdict.livenessPassed && verdict.challengePassed == true
+            if (passed && ((enrollment && template == null) || (lifeCertificate && probe == null))) {
+                abortReason = "FACE_NOT_CAPTURED"
+            }
+        }
+        val framesUsed = when {
+            enrollment -> faceCapture.framesUsed(FaceCapture.ENROLL_K)
+            lifeCertificate -> faceCapture.framesUsed(FaceCapture.PROBE_K)
+            else -> result.samplesInWindow
+        }
+        Log.i(FaceEmbedder.TAG, "Face frames: ${faceCapture.goodFrames()} good of ${faceCapture.framesSeen}; sending " +
+            when {
+                template != null -> "reference template (${template.size} values, best $framesUsed frames)"
+                probe != null -> "probe embedding (${probe.size} values, best $framesUsed frames)"
+                qr.isAuth -> "no face data (practice scan)"
+                else -> "no face data"
+            })
+        if (!cryptoManager.hasKey()) cryptoManager.generateHardwareKey()
         val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }.format(Date())
@@ -655,16 +891,22 @@ class MainActivity : AppCompatActivity() {
             nonce = qr.nonce,
             timestamp = timestamp,
             deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown",
-            bpm = result.bpm,
-            snr = result.medianSnrDb,
-            livenessPassed = livenessPassed,
-            framesUsed = result.samplesInWindow,
+            bpm = finite(result.bpm, 0.0),
+            snr = finite(result.medianSnrDb, -99.0),
+            livenessPassed = verdict.livenessPassed,
+            challengeId = qr.challengeId,
+            challengePassed = if (qr.challengeId != null) (verdict.challengePassed ?: false) else null,
+            faceEmbedding = probe?.toList(),
+            referenceTemplate = template?.toList(),
+            modelVersion = if (qr.isAuth) null else FaceEmbedder.MODEL_VERSION,
+            keySecurityLevel = cryptoManager.keySecurityLevel(),
+            consent = true,
+            framesUsed = framesUsed,
             appVersion = BuildConfig.VERSION_NAME,
             diagnostics = diag,
             abortReason = abortReason,
         )
         val payloadJson = Json.encodeToString(BiometricPayload.serializer(), payload)
-        if (!cryptoManager.hasKey()) cryptoManager.generateHardwareKey()
         return VerifyRequest(
             payload = Base64.encodeToString(payloadJson.toByteArray(Charsets.UTF_8), Base64.NO_WRAP),
             signature = cryptoManager.signPayload(payloadJson),
@@ -673,203 +915,125 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    // ── Screens ─────────────────────────────────────────────────────────
+    // ── Face scan screen ────────────────────────────────────────────────
 
     @Composable
-    private fun HomeScreen(onScan: () -> Unit) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.fillMaxSize().padding(32.dp),
-        ) {
-            Text("Jeevan Suraksha", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "Scan the QR code shown on the portal to start.",
-                color = Color.White.copy(alpha = 0.8f), fontSize = 20.sp, textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(40.dp))
-            Button(
-                onClick = onScan,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE8603C)),
-                modifier = Modifier.fillMaxWidth().height(64.dp),
-            ) {
-                Text("Scan QR code", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            }
-        }
-    }
-
-    @Composable
-    private fun BannerText(text: String) {
-        Box(Modifier.fillMaxSize()) {
-            Text(
-                text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 48.dp, start = 24.dp, end = 24.dp)
-                    .background(Color.Black.copy(alpha = 0.5f)).padding(12.dp),
-            )
-        }
-    }
-
-    @Composable
-    private fun BusyScreen(message: String) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(color = Color(0xFFE8603C), modifier = Modifier.size(64.dp))
-            Spacer(Modifier.height(20.dp))
-            Text(message, color = Color.White, fontSize = 20.sp)
-        }
-    }
-
-    @Composable
-    private fun ResultScreen(result: ScanState.Result) {
-        val color = if (result.success) GREEN else Color(0xFFFF5252)
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxSize().padding(32.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(if (result.success) "✓" else "!", color = color, fontSize = 72.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
-            Text(result.title, color = color, fontSize = 28.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-            result.message?.let {
-                Spacer(Modifier.height(12.dp))
-                Text(it, color = Color.White, fontSize = 18.sp, textAlign = TextAlign.Center)
-            }
-            Spacer(Modifier.height(36.dp))
-            Button(
-                onClick = { scanState.value = ScanState.Home },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE8603C)),
-                modifier = Modifier.width(220.dp).height(56.dp),
-            ) {
-                Text("Done", fontSize = 20.sp, color = Color.White)
-            }
-        }
-    }
-
-    @Composable
-    private fun MeasuringHud() {
+    private fun FaceScanScreen(qr: QrPayload) {
         val r by rppgState
-        val faceVisible by faceVisibleState
+        val currentPhase by phaseState
+        val ch by challengeUiState
         val guidance by guidanceState
+        val faceVisible by faceVisibleState
+        val verified by verifiedState
         val showDiag by showDiagnostics
-        val snap by diagSnapshotState
-        val prompt = when {
-            r.stable -> "Pulse steady ✓"
-            guidance != null -> guidance!!
-            !faceVisible && !r.hasEstimate -> "Position your face in the frame"
-            r.hasEstimate -> "Measuring… hold still"
-            else -> "Measuring…"
-        }
-        Box(Modifier.fillMaxSize()) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.55f)).padding(16.dp),
-            ) {
-                Text(prompt, color = if (r.stable) GREEN else Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        progress = r.windowFill.toFloat(),
-                        color = if (r.stable) GREEN else AMBER,
-                        strokeWidth = 6.dp,
-                        modifier = Modifier.size(48.dp),
-                    )
-                    Spacer(Modifier.width(20.dp))
-                    Metric("PULSE", if (r.hasEstimate) "%.0f".format(r.bpm) else "--", "BPM",
-                        if (r.stable) GREEN else Color.White.copy(alpha = 0.6f))
-                    Spacer(Modifier.width(24.dp))
-                    Metric("SIGNAL", if (r.hasEstimate) "%.1f".format(r.medianSnrDb) else "--", "dB",
-                        Color(0xFF00CCFF))
-                }
-            }
-            PulseWaveform(r.waveform, Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp))
-            // Small diagnostics toggle (off by default so the demo screen stays clean).
-            Text(
-                if (showDiag) "Hide diagnostics" else "Diagnostics",
-                color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .clickable { showDiagnostics.value = !showDiag }
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+        val frames = faceFramesState.intValue
+        val needed = if (qr.purpose == QrPayload.PURPOSE_ENROLLMENT) FaceCapture.ENROLL_MIN else FaceCapture.PROBE_MIN
+
+        val (prompt, detail) = when (currentPhase) {
+            ScanPhase.PULSE -> Pair(
+                guidance ?: if (faceVisible) "Hold still" else "Look at the screen",
+                if (r.hasEstimate) "Measuring your pulse…" else "Keep your face inside the circle",
             )
-            val sn = snap
-            if (showDiag && sn != null) {
-                Column(
-                    modifier = Modifier.align(Alignment.CenterStart).padding(12.dp)
-                        .background(Color.Black.copy(alpha = 0.6f)).padding(10.dp),
-                ) {
-                    DiagLine("time", "%.1f s".format(sn.elapsedSec))
-                    DiagLine("camera", "%.1f fps %s".format(sn.fps, sn.fpsRange))
-                    DiagLine("pulse", "%.1f BPM (spread %.1f)".format(sn.bpm, sn.spreadBpm))
-                    DiagLine("SNR", "%.1f dB (min %.1f)".format(sn.snrDb, sn.minSnrDb))
-                    DiagLine("light", "%.0f / 255".format(sn.luma))
-                    DiagLine("AE lock", if (sn.aeLocked) "yes" else "no")
-                    DiagLine("waiting for", sn.gate.label)
-                    DiagLine("face frames", "${faceFramesState.intValue} good")
-                }
-            }
+            ScanPhase.CHALLENGE -> challengePrompt(ch)
+            ScanPhase.CAPTURE -> Pair("Hold still", "Look straight at the screen")
+            ScanPhase.DONE -> Pair(if (verified) "Done ✓" else "Done", "Sending your result…")
+        }
+        val progress = when (currentPhase) {
+            ScanPhase.PULSE -> (r.windowFill * 0.6).toFloat()
+            ScanPhase.CHALLENGE -> 0.7f
+            ScanPhase.CAPTURE -> 0.8f + 0.2f * (frames.toFloat() / needed).coerceAtMost(1f)
+            ScanPhase.DONE -> 1f
+        }
+
+        Box(Modifier.fillMaxSize()) {
+            FaceOverlay(showDiag)
+            FaceScanHud(
+                prompt = prompt,
+                detail = detail,
+                progress = progress,
+                verified = verified,
+                bpm = if (r.hasEstimate) "%.0f".format(r.bpm) else "--",
+                snr = if (r.hasEstimate) "%.1f".format(r.medianSnrDb) else "--",
+                waveform = r.waveform,
+                diagnosticsOn = showDiag,
+                onToggleDiagnostics = { showDiagnostics.value = !showDiag },
+            )
+            if (showDiag) DiagnosticsPanel(Modifier.align(Alignment.CenterStart), currentPhase, ch, frames)
+        }
+    }
+
+    private fun challengePrompt(c: ChallengeUi?): Pair<String, String?> {
+        if (c == null) return Pair("Get ready", null)
+        val title = when (c.type) {
+            ChallengeVerifier.BLINK_TWICE -> "Blink twice now"
+            ChallengeVerifier.TURN_LEFT -> "← Turn your head to your left"
+            ChallengeVerifier.TURN_RIGHT -> "Turn your head to your right →"
+            else -> c.type
+        }
+        val detail = c.hint ?: when (c.type) {
+            ChallengeVerifier.BLINK_TWICE -> "${c.blinks} of ${ChallengeVerifier.BLINKS_NEEDED} · ${c.secondsLeft} s left"
+            else -> "Then look back at the screen · ${c.secondsLeft} s left"
+        }
+        return Pair(title, detail)
+    }
+
+    @Composable
+    private fun DiagnosticsPanel(modifier: Modifier, currentPhase: ScanPhase, ch: ChallengeUi?, frames: Int) {
+        val snap by diagSnapshotState
+        val sn = snap ?: return
+        Column(
+            modifier = modifier.padding(12.dp)
+                .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).padding(10.dp),
+        ) {
+            DiagLine("time", "%.1f s".format(sn.elapsedSec))
+            DiagLine("camera", "%.1f fps %s".format(sn.fps, sn.fpsRange))
+            DiagLine("pulse", "%.1f BPM (spread %.1f)".format(sn.bpm, sn.spreadBpm))
+            DiagLine("SNR", "%.1f dB (min %.1f)".format(sn.snrDb, sn.minSnrDb))
+            DiagLine("light", "%.0f / 255".format(sn.luma))
+            DiagLine("AE lock", if (sn.aeLocked) "yes" else "no")
+            DiagLine("waiting for", sn.gate.label)
+            DiagLine("step", currentPhase.name.lowercase())
+            if (ch != null) DiagLine("challenge", "${ch.type} yaw %.0f° blinks ${ch.blinks}".format(ch.yaw))
+            DiagLine("face frames", "$frames good")
         }
     }
 
     @Composable
     private fun DiagLine(label: String, value: String) {
         Row {
-            Text("$label: ", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
+            Text("$label: ", color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp)
             Text(value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 
+    /**
+     * The whole-face box (build-prompt §4.2) over the mirrored, FILL_CENTER
+     * front-camera preview, plus the forehead/cheek ROIs when diagnostics are on.
+     */
     @Composable
-    private fun Metric(label: String, value: String, unit: String, color: Color) {
-        Column {
-            Text(label, color = color.copy(alpha = 0.8f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(value, color = color, fontSize = 36.sp, fontWeight = FontWeight.Black)
-                Text(" $unit", color = color.copy(alpha = 0.8f), fontSize = 14.sp, modifier = Modifier.padding(bottom = 6.dp))
-            }
-        }
-    }
-
-    @Composable
-    private fun PulseWaveform(signal: DoubleArray, modifier: Modifier) {
-        Canvas(modifier = modifier.fillMaxWidth().height(140.dp).padding(horizontal = 16.dp)) {
-            if (signal.size < 2) return@Canvas
-            val path = Path()
-            val xStep = size.width / (signal.size - 1)
-            val mid = size.height / 2f
-            signal.forEachIndexed { i, v ->
-                val x = i * xStep
-                val y = mid - (v.toFloat() * size.height * 0.42f)  // signal is already scaled to [-1, 1]
-                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            }
-            drawPath(path, color = GREEN, style = Stroke(width = 5f))
-        }
-    }
-
-    /** Draws the forehead/cheek ROIs over the (mirrored, FILL_CENTER) front-camera preview. */
-    @Composable
-    private fun RoiOverlay() {
+    private fun FaceOverlay(showRois: Boolean) {
         val rois by roiOverlayState
         val img by overlayImageSize
         val box by faceBoxState
         Canvas(modifier = Modifier.fillMaxSize()) {
-            if (rois.isEmpty() || img.width == 0 || img.height == 0) return@Canvas
+            if (img.width == 0 || img.height == 0) return@Canvas
             val scale = maxOf(size.width / img.width, size.height / img.height)
             val dx = (size.width - img.width * scale) / 2f
             val dy = (size.height - img.height * scale) / 2f
             box?.let { f ->
                 drawRect(
-                    color = AMBER,
+                    color = Color.White.copy(alpha = 0.8f),
                     topLeft = Offset(size.width - (dx + f.right * scale), dy + f.top * scale),
                     size = ComposeSize(f.width() * scale, f.height() * scale),
-                    style = Stroke(width = 6f),
+                    style = Stroke(width = 4f),
                 )
             }
+            if (!showRois) return@Canvas
             rois.forEach { r ->
                 val left = size.width - (dx + r.right * scale)  // mirror X for the front camera
                 val top = dy + r.top * scale
                 drawRect(
-                    color = GREEN,
+                    color = ROI_GREEN,
                     topLeft = Offset(left, top),
                     size = ComposeSize(r.width() * scale, r.height() * scale),
                     style = Stroke(width = 4f),

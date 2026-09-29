@@ -58,7 +58,7 @@ class FaceCapture {
     @Synchronized
     fun add(embedding: FloatArray, quality: Float) {
         framesSeen++
-        if (quality <= 0f) return
+        if (quality <= 0f || embedding.any { !it.isFinite() }) return
         if (candidates.size >= MAX_CANDIDATES) {
             val worst = candidates.indices.minByOrNull { candidates[it].quality } ?: return
             if (candidates[worst].quality >= quality) return

@@ -9,7 +9,7 @@
 - [x] **2. Scan-speed diagnostics.** On-screen diagnostics toggle (off by default), `SentinelDiag` logcat, per-scan summary stored by the backend, 30 fps request, AE/AWB lock, poor-conditions guidance, a scan-speed comparison test. Also: gate parameters come from the backend `.env` via the QR code, and face-loss tolerance is relaxed (it was 1 s, a likely cause of scans never finishing).
 - [x] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
 - [x] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
-- [ ] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
+- [x] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
 - [ ] **6. M8:** docs, `DEMO_SCRIPT.md`, end-to-end run with the simulator, and one combined `TESTING_CHECKLIST.md`.
 
 **Final deliverable to the user:** one summary covering what was built, what was verified here, the combined test list, which commit to check first if the Android build fails, and how to read the diagnostics (camera vs lighting vs thresholds). The user said: don't lower `MIN_SNR_DB` without real measurements.
@@ -553,3 +553,28 @@ The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). Rea
   - Embeddings are only *logged* in M3; M4 puts them into the payload.
 - **Dependency:** `com.google.ai.edge.litert:litert:1.4.2` (checked: `Interpreter(ByteBuffer, Options)`, `run`, `get{Input,Output}Tensor`, arm64/armv7 native libraries).
 - **Backend:** `abort_reason` (Literal `MULTIPLE_FACES`) → reason `MULTIPLE_FACES`, which doesn't count toward freezing. The portal maps it to the "Measuring pulse" step with advice.
+
+### M4: Random challenge, extended signed payload, four app screens (2026-09-30)
+- **Challenge** (`face/ChallengeVerifier.kt`, pure Kotlin, JVM tests in `app/src/test/.../ChallengeVerifierTest.kt`):
+  - BLINK_TWICE uses ML Kit eyes-open probability with hysteresis (closed < 0.35, open > 0.65).
+  - TURN_LEFT/RIGHT uses head yaw: frontal first, then ≥ 25° in the requested direction for 2 detections in a row. The wrong way only shows the hint "Other way".
+  - The time limit comes from the QR `challenge.timeout_s`.
+  - `LEFT_YAW_SIGN` is the one constant to flip if a phone reports yaw the other way (test 4.6).
+- **Scan phases** (MainActivity): PULSE (stable gate as before) → CHALLENGE (face detection on every frame) → CAPTURE (wait ≤ 6 s for ENROLL_MIN / PROBE_MIN clear face frames) → submit.
+  - Practice (AUTH) scans have no challenge and submit on the stable pulse, as before.
+  - Losing the face or a change of tracked face during the challenge sends the scan back to PULSE.
+  - Telemetry sends `challenge_issued/passed/failed` (the portal stepper already handled them).
+- **Signed payload** (build-prompt §4.4) adds:
+  - `challenge_id`, `challenge_passed`;
+  - `face_embedding` (life certificate, best 5 frames) or `reference_template` (registration, best 15);
+  - `frames_used` (face frames averaged), `model_version`, `consent`;
+  - `key_security_level` from `KeyInfo` (Android 12+ exact; older versions report StrongBox as TEE, never overstated).
+  - Error responses (non-2xx) are parsed too.
+- **Screens** (`ui/Theme.kt`, `ui/Screens.kt`, DESIGN.md §7): Scan QR (welcome + camera with an orange frame) → Consent (purpose-specific plain-language points) → Face Scan (dark camera, guide circle orange→green, progress ring, big prompt, pulse + waveform card, diagnostics toggle) → Result (big icon, outcome, reason).
+  - Fonts: system sans-serif, not Poppins/Inter. Downloadable fonts would need another dependency; left out on purpose.
+- **Backend:**
+  - `abort_reason` also accepts `FACE_NOT_CAPTURED` (not counted toward freezing).
+  - The schema no longer requires face data when the app aborted or when the pulse or challenge failed, so those attempts are reported with their real reason (before this, a MULTIPLE_FACES abort on a life-certificate QR would have failed validation).
+  - New test (73 total).
+  - The portal maps FACE_NOT_CAPTURED to the Face step.
+- App version 4.0-challenge (versionCode 5).

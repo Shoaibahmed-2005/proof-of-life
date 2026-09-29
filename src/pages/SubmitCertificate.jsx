@@ -14,6 +14,7 @@ const REASON_HELP = {
   FACE_MISMATCH: 'The face did not match the registered pensioner. Only the registered pensioner can submit.',
   DEVICE_MISMATCH: 'Please use the phone that was registered with the officer.',
   MULTIPLE_FACES: 'Only the pensioner may be in front of the camera. Ask others to step away and try again.',
+  FACE_NOT_CAPTURED: 'Your face was not captured clearly. Face the camera directly, in good even light, and try again.',
 };
 
 export default function SubmitCertificate() {

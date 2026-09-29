@@ -11,6 +11,7 @@ Toolchain versions and first-time setup are in `ANDROID_STUDIO_SETUP.md`. Phone 
 ```powershell
 .\gradlew :app:assembleDebug     # → app\build\outputs\apk\debug\app-debug.apk
 .\gradlew :app:installDebug      # installs on the connected phone (adb devices must list it)
+.\gradlew :app:testDebugUnitTest # JVM unit tests (challenge logic); no phone needed
 ```
 
 The NDK version is pinned in `app/build.gradle.kts` (`ndkVersion = "28.2.13676358"`). If it isn't installed, run `sdkmanager "ndk;28.2.13676358"`.

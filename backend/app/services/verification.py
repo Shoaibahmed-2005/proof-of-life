@@ -206,6 +206,9 @@ def _check_consent(db: Session, session: AuthSession, payload: BiometricPayload)
 def _check_abort(payload: BiometricPayload) -> None:
     if payload.abort_reason == "MULTIPLE_FACES":
         raise _Reject("MULTIPLE_FACES", "More than one face was in view; only the pensioner may be in front of the camera")
+    if payload.abort_reason == "FACE_NOT_CAPTURED":
+        raise _Reject("FACE_NOT_CAPTURED",
+                      "The face could not be captured clearly; face the camera in good light and try again")
 
 
 def _check_liveness(payload: BiometricPayload) -> None:
