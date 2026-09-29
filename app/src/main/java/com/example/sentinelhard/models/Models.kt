@@ -18,18 +18,30 @@ data class VerifyRequest(
 )
 
 /**
- * Raw biometric telemetry data, serialized to JSON then signed.
+ * Biometric result, serialized to JSON then signed inside Titan M2.
+ *
+ * Optional fields default to null and are left out of the JSON when null
+ * (kotlinx.serialization's default Json does not encode default values).
+ * Milestones 3–4 add face_embedding / reference_template, challenge fields
+ * and key_security_level.
  */
 @Serializable
 data class BiometricPayload(
     @SerialName("session_id")
     val sessionId: String,
-    val bpm: Double,
-    val timestamp: String,            // ISO-8601
+    val purpose: String? = null,
+    val nonce: String? = null,
+    val timestamp: String,            // ISO-8601 UTC
     @SerialName("device_id")
     val deviceId: String,
-    val snr: Double,
-    val variance: Double
+    val bpm: Double,
+    val snr: Double,                  // rPPG SNR in dB (median of the final estimates)
+    @SerialName("liveness_passed")
+    val livenessPassed: Boolean? = null,
+    @SerialName("frames_used")
+    val framesUsed: Int? = null,
+    @SerialName("app_version")
+    val appVersion: String? = null,
 )
 
 /**
@@ -40,7 +52,10 @@ data class VerifyResponse(
     val status: String,
     @SerialName("session_id")
     val sessionId: String,
-    val reason: String? = null
+    val reason: String? = null,
+    @SerialName("reason_code")
+    val reasonCode: String? = null,
+    val outcome: String? = null,
 )
 
 /**
@@ -50,7 +65,7 @@ data class VerifyResponse(
 data class SessionResponse(
     @SerialName("session_id")
     val sessionId: String,
-    val status: String,               // e.g. "pending", "authenticated", "rejected"
+    val status: String,               // e.g. "PENDING", "GRANTED", "REJECTED"
     @SerialName("created_at")
     val createdAt: String = "",
     @SerialName("expires_at")

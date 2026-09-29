@@ -56,7 +56,7 @@ def test_simulator_builds_valid_requests(client, officer_headers):
     from tests.conftest import create_pensioner
 
     def run(qr, **kw):
-        args = type("A", (), dict(person="A", device="pixel-sim", similarity=0.92, bpm=72.0,
+        args = type("A", (), dict(person="A", device="pixel-sim", similarity=0.92, bpm=72.0, legacy=False,
                                   snr=7.5, no_pulse=False, challenge_fail=False) | kw)
         return client.post("/api/v1/auth/verify", json=simulate_phone.build_request(qr, args)).json()
 

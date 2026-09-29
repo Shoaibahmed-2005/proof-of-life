@@ -98,9 +98,12 @@ def build_request(qr: dict, args) -> dict:
         payload["reference_template"] = face
     elif purpose == "LIFE_CERTIFICATE":
         payload["face_embedding"] = probe_with_similarity(face, args.similarity, seed)
-    else:  # legacy AUTH payload
+    elif args.legacy:  # original app's AUTH payload
         payload = {k: payload[k] for k in ("session_id", "timestamp", "device_id", "bpm")}
         payload.update({"snr": 5.0, "variance": 2.0})
+    else:  # Milestone 2 app on an AUTH session: rPPG only
+        for k in ("challenge_id", "challenge_passed", "model_version", "key_security_level", "consent"):
+            payload.pop(k)
 
     key = load_key(args.device)
     raw = json.dumps(payload).encode()
@@ -111,6 +114,31 @@ def build_request(qr: dict, args) -> dict:
         "signature": base64.b64encode(key.sign(raw, ec.ECDSA(hashes.SHA256()))).decode(),
         "public_key": base64.b64encode(der).decode(),
     }
+
+
+def stream_telemetry(base: str, qr: dict, args) -> None:
+    """Sends scan progress like the app does, so the portal's live status can be checked."""
+    import asyncio
+    import websockets
+
+    async def run():
+        ws_url = (base.replace("http", "ws", 1) + f"{settings.API_V1_STR}/ws/telemetry/"
+                  f"{qr['session_id']}?nonce={qr.get('nonce', '')}")
+        async with websockets.connect(ws_url) as ws:
+            await ws.send(json.dumps({"type": "scan_started"}))
+            steps = 6
+            for i in range(1, steps + 1):
+                await asyncio.sleep(args.telemetry_interval)
+                bpm = args.bpm + (steps - i) * 1.5
+                snr = 1.0 if args.no_pulse else args.snr * i / steps
+                await ws.send(json.dumps({"type": "measuring", "bpm": bpm, "snr": snr,
+                                          "progress": i / steps, "stable": i == steps and not args.no_pulse}))
+                await ws.recv()
+
+    try:
+        asyncio.run(run())
+    except Exception as e:  # telemetry is best effort, like in the app
+        print(f"(telemetry skipped: {e})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,10 +153,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-pulse", action="store_true", help="Simulate a photo (liveness fails)")
     parser.add_argument("--challenge-fail", action="store_true", help="Simulate a video replay")
     parser.add_argument("--base-url", help="Override the backend URL from the QR")
+    parser.add_argument("--legacy", action="store_true", help="AUTH: send the original app's payload")
+    parser.add_argument("--no-telemetry", action="store_true", help="Don't stream live MEASURING events")
+    parser.add_argument("--telemetry-interval", type=float, default=0.8, help="Seconds between live events")
     args = parser.parse_args(argv)
 
     qr = json.loads(args.qr)
     base = (args.base_url or qr.get("base_url") or "http://localhost:8000").rstrip("/")
+    if not args.no_telemetry:
+        stream_telemetry(base, qr, args)
     body = json.dumps(build_request(qr, args)).encode()
     req = urllib.request.Request(f"{base}{settings.API_V1_STR}/auth/verify", data=body,
                                  headers={"Content-Type": "application/json"}, method="POST")

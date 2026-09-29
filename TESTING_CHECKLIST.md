@@ -33,11 +33,23 @@ Test conditions: indoor, even light on the face (no strong window light behind y
 
 ## 1. Milestone 2: rPPG fixes + QR-carried backend URL
 
+**What changed in the app:**
+- The home screen has one button, "Scan QR code". The old "Login Directly on Phone" option is gone.
+- The rPPG engine is rewritten: a 10 s window, a 0.7–4 Hz band-pass filter, and an SNR in dB updated twice a second.
+- The pulse is taken from the forehead and both cheeks (three green boxes on screen).
+- The scan passes only when 5 estimates in a row agree within ±3 BPM and the SNR is at least the minimum. The minimum comes from the QR code (backend `.env` `MIN_SNR_DB`, default 3.0 dB).
+- Without a stable pulse within 30 s, the app reports "No pulse detected".
+- The backend address comes from the QR code.
+
+The laptop portal is still the old banking demo in this milestone (the new portal is M7), but it now shows the phone's live progress and rejections.
+
+**Before the first scan:** open the portal, click **Initialize**, and scan the QR code on screen.
+
 | # | Test | Steps | Expected result |
 |---|---|---|---|
 | 2.1 | Build | Section 0, step 3 | Builds with no errors and the app installs. |
-| 2.2 | QR carries the backend URL | The portal shows a QR code. Scan it with the app. | The app opens the front camera. **No IP was typed or built into the app.** `logcat` shows the parsed `base_url`. |
-| 2.3 | "Measuring…" gate | Sit still facing the camera. | The screen says **"Measuring…"** for **at least 10 s**. It must **not** show verified or passed in the first seconds. |
+| 2.2 | QR carries the backend URL | The portal shows a QR code. Scan it with the app. | "Connecting to the portal…", then the front camera opens. **No IP was typed or built into the app.** `logcat` (tag `SentinelHard`) shows `QR scanned: … base_url=http://<laptop IP>:8000 min_snr_db=3.0` and `Backend candidates … → using …`. |
+| 2.3 | "Measuring…" gate | Sit still facing the camera. | The screen says **"Measuring…"**, and the progress ring fills over about 10 s. It must **not** show "Pulse steady" before about 9.5 s. The BPM number stays grey until steady. |
 | 2.4 | BPM converges | Keep still. At the same time, count your pulse on your wrist for 30 s and multiply by 2. | The BPM settles and stops climbing. When it passes, it's within about **±5 BPM** of your wrist count. Note both numbers. |
 | 2.5 | SNR updates live | Watch the SNR value (now in real dB). | It **changes** over time (not a constant 2.8). It rises as the reading stabilises. Note the value at the moment of passing. |
 | 2.6 | Smooth waveform | Watch the waveform. | A **smooth, regular wave** at your pulse rate, not jagged noise. |
@@ -47,8 +59,18 @@ Test conditions: indoor, even light on the face (no strong window light behind y
 | 2.10 | Second scan | Finish one scan, return, and scan a **new** QR code straight away. | The new scan starts from zero ("Measuring…" again, at least 10 s). It **doesn't** auto-submit instantly. |
 | 2.11 | Camera released | Finish a scan and go to the result screen. | The camera privacy dot/indicator turns off. |
 | 2.12 | Wi-Fi path | Repeat 2.2 and 2.7 without `adb reverse`, with the phone on the same Wi-Fi as the laptop. | Works without rebuilding. |
+| 2.13 | Live progress on the portal | Watch the laptop during a scan. | The portal shows "Measuring pulse… NN BPM · signal X dB · NN%", updating about every half second. |
+| 2.14 | Photo → rejection on both screens | Test 2.8 until it times out (30 s). | Phone: "Not verified: No pulse detected…". Portal: red **Rejected** box with the same reason and a *Try again* button. |
+| 2.15 | Face lost | During a scan, move out of view for 2 s, then come back. | The boxes disappear and the measurement restarts from zero ("Measuring…", ring empty). It still passes about 10 s after you return. |
+| 2.16 | Wrong QR | Scan any other QR code (e.g. a URL). | "Not a portal QR code". No crash. |
 
-**Send back for M2:** the wrist BPM vs the app BPM for 3 scans, the SNR at pass time, the SNR during the photo test, and one `logcat` capture of a full scan.
+**Send back for M2:**
+- the wrist BPM vs the app BPM for 3 scans;
+- the SNR at pass time for each scan (`SentinelTelemetry` log lines);
+- the highest SNR shown during the photo test;
+- one full `logcat` capture of a passing scan and one of the photo test.
+
+These set `MIN_SNR_DB` in `backend/.env`, with no rebuild needed. It should sit between the photo's highest SNR and the genuine scans' pass-time SNR.
 
 ---
 
@@ -123,9 +145,9 @@ The app writes to these `logcat` tags:
 | Tag | What it logs |
 |---|---|
 | `SentinelHard` | App flow, QR parsing, network calls, signing, key security level |
-| `SentinelHardNative` | C++ rPPG engine: BPM, SNR (dB), window fill |
-| `SentinelDSP` | Stability gate and face-lost resets |
-| `SentinelTelemetry` | Per-estimate BPM/SNR summary |
+| `SentinelHardNative` | C++ rPPG engine: every estimate (BPM, SNR dB, median SNR, window fill, stable, skin fraction, pixels) |
+| `SentinelDSP` | Stable-pulse decision, 30 s no-pulse timeout, face-lost restarts |
+| `SentinelTelemetry` | Per-estimate BPM/SNR summary (one line every 0.5 s) |
 | `TelemetryStreamer` | Live telemetry WebSocket |
 | `SentinelFace` | Face detection, face count, embeddings, template building (M3+) |
 | `SentinelChallenge` | Challenge issued, landmark values, pass or fail (M4+) |

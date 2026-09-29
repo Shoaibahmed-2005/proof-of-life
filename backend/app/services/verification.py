@@ -241,10 +241,15 @@ def _verify_auth(db: Session, session: AuthSession, payload: BiometricPayload) -
     age = (utcnow() - payload.timestamp).total_seconds()
     if abs(age) > settings.SESSION_EXPIRY_SECONDS:
         raise _Reject("STALE_PAYLOAD", "Payload timestamp is too old")
-    try:
-        validate_liveness(bpm=payload.bpm, snr=payload.snr, variance=payload.variance)
-    except SpoofingDetectedError as e:
-        raise _Reject(e.reason_code, str(e)) from e
+    if payload.liveness_passed is not None:
+        # Current app (Milestone 2+): SNR in dB and the phone's stability verdict.
+        _check_liveness(payload)
+    else:
+        # Original app: linear SNR ratio and head-motion variance.
+        try:
+            validate_liveness(bpm=payload.bpm, snr=payload.snr, variance=payload.variance)
+        except SpoofingDetectedError as e:
+            raise _Reject(e.reason_code, str(e)) from e
 
     sessions.finish(db, session, SessionStatus.GRANTED, outcome="GRANTED",
                     bpm=payload.bpm, device_id=payload.device_id)

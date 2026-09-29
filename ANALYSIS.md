@@ -377,3 +377,62 @@ Each milestone ends with: a build (or a teammate build if D1 is declined), an en
 - **QR `base_url`:** `PUBLIC_BASE_URL`, or else the laptop's LAN IP. The app will fall back to `localhost` for `adb reverse` (M2).
 - **Thresholds:** `FACE_T_HIGH=0.70`, `FACE_T_LOW=0.50`, `FACE_ANCHOR_MIN=0.55` and `MIN_SNR_DB=3.0` are **placeholders** until calibrated with `calibrate_thresholds.py` on real scans.
 - **Payload additions beyond §4.4:** `model_version`, `key_security_level` and `consent` (all optional for AUTH).
+
+**After M5 (same day):** an officer can lift a freeze from the review queue (`GET /reviews/frozen`, `POST /reviews/frozen/{id}/restore`), and `scripts/reset_demo.py` resets the demo to a clean state (the old data is moved to `data/backups/`, never deleted).
+
+### M2: rPPG fixes, QR-carried backend URL, laptop engine tests (2026-09-30)
+
+**Android native (`app/src/main/cpp/`):**
+- **New `rppg_core.{h,cpp}`:** a pure C++17 engine with no JNI/OpenCV, so it runs on a laptop. Per frame, it takes the mean colour of the skin pixels inside the face ROIs, read straight from the YUV planes (YCbCr skin box, glare excluded). Over a **10 s window** it runs: resample to 30 Hz → **POS** (1.6 s overlap-add) → linear detrend → **zero-phase Butterworth band-pass 0.7–4 Hz** → Hann spectrum on a 0.5 BPM grid → peak → **SNR in dB** (de Haan: ±0.2 Hz around f0 and 2·f0 vs the rest), with an estimate every 0.5 s.
+- **Stability gate:** window ≥ 95% full, 5 estimates within ±3 BPM of their median, and median SNR ≥ `minSnrDb`. The reported BPM is that median. A timestamp gap over 1 s restarts the scan.
+- **Removed:** the Kalman filter with its 75 BPM prior, the texture/QR/correlation/"HRV" confidence heuristic, and full-frame RGB conversion.
+- **`native-lib.cpp` rewritten** as a thin JNI layer for `com.example.sentinelhard.rppg.RppgNative`. Planes are read as direct ByteBuffers with no copy, and ROIs are passed as a flat array.
+- **`CMakeLists.txt`:** adds `rppg_core.cpp` and C++17. OpenCV stays linked.
+
+**Android Kotlin:**
+- **New files:**
+  - `rppg/RppgNative.kt` (JNI);
+  - `rppg/RppgResult.kt` (output layout);
+  - `rppg/RppgConfig.kt` (window, gate, 30 s timeout);
+  - `rppg/FaceRois.kt` (forehead + two cheeks inside the ML Kit face box, mapped to sensor coordinates);
+  - `network/QrPayload.kt` (parses the v1 QR JSON, or a legacy bare id).
+- **`MainActivity` rewritten:**
+  - flow Home → Scan QR → Connecting → Measuring → Submitting → Result;
+  - state reset at the start of every scan;
+  - the camera is released when a screen is left;
+  - the signed payload is auto-submitted once the reading is stable;
+  - a signed "no pulse" is sent after 30 s;
+  - StrongBox keygen runs off the UI thread.
+- **Removed:** "Login Directly on Phone", micro-motion variance, voting/dwell/hysteresis, coasting, and the per-pixel YUV copy.
+- **`ApiClient`:** one Retrofit client per base URL from the QR; probes `/health` on the QR URL, then on `localhost` (for `adb reverse`). The hard-coded `10.0.2.2:8080` is gone.
+- **`TelemetryStreamer`:** `/ws/telemetry/{session_id}?nonce=` with events `scan_started`, `measuring`, `stable_reading` and `face_lost`.
+- **`Models`:** the payload adds `purpose`, `nonce`, `liveness_passed`, `frames_used` and `app_version`; `variance` is dropped. SNR is in dB.
+- **`build.gradle.kts`:** `ndkVersion = "28.2.13676358"` pinned, `buildConfig = true`, version `2.0-m2` (code 2).
+- **New `app/proguard-rules.pro`**, so release builds no longer reference a missing file.
+
+**Backend:**
+- The QR payload gains `liveness.min_snr_db` (from `MIN_SNR_DB`).
+- AUTH sessions use the dB liveness check when the payload has `liveness_passed`; the original app's payload still gets the legacy check.
+- **Bug fixed:** the telemetry relay didn't acknowledge throttled messages. Found in live testing, with a regression test added.
+- The simulator acts like the M2 app, including live telemetry (`--legacy` gives the old payload).
+
+**Portal (minimal; the full redesign is M7):**
+- Port 8000 via `VITE_API_BASE`.
+- The QR encodes `qr_payload`.
+- **The always-grant "Simulate" button and the fake "standalone" sessions are removed.** If the backend is down, the portal says so.
+- Live `MEASURING` status and `REJECTED` reasons are shown.
+
+**Laptop tests (`tools/rppg/run_tests.py`):**
+- zig-compiled C++ unit tests (filter response, zero phase, YUV plane indexing with interleaved and padded layouts, POS rejects brightness-only changes, gaps);
+- filters checked against scipy;
+- the JNI layer compiled against a `jni.h` stub;
+- 10 synthetic scenarios;
+- C++ vs the Python reference (agree to 0.0001 BPM / dB);
+- Monte-Carlo pass rates (default 3.0 dB: 0% photos pass, 88% genuine).
+
+**Known limits of M2** (by design; later milestones):
+- no whole-face box or multi-face rejection (M3);
+- no challenge (M4);
+- only AUTH QR codes are accepted by the app (M3/M4 add ENROLLMENT and LIFE_CERTIFICATE);
+- the dark HUD stays until the M4 screens;
+- the ROI overlay assumes the preview and analysis streams have the same aspect ratio.

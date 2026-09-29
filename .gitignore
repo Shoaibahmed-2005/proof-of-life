@@ -43,3 +43,6 @@ sql_app.db
 .idea/
 .DS_Store
 Thumbs.db
+
+# rPPG laptop test build output
+tools/rppg/build/

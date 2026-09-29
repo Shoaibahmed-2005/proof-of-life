@@ -424,3 +424,54 @@ def test_demo_finale_freeze_then_officer_restores_from_queue(client, officer_hea
         events = [e.event_type for e in d.exec(select(LedgerEntry).order_by(LedgerEntry.id)).all()]
         assert events.count("STATUS_CHANGED") == 2  # frozen, then restored
         assert ledger.verify_chain(d).valid
+
+
+# ── Milestone 2 app on the AUTH flow ────────────────────────────────────
+
+def m2_auth_payload(s, **overrides):
+    """What the Milestone 2 app signs for an AUTH session."""
+    p = {"session_id": s["session_id"], "purpose": "AUTH", "nonce": s["qr_payload"]["nonce"],
+         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "device_id": "pixel", "bpm": 71.5, "snr": 6.2, "liveness_passed": True,
+         "frames_used": 290, "app_version": "2.0-m2"}
+    p.update(overrides)
+    return p
+
+
+def test_qr_carries_min_snr(client):
+    s = client.post("/api/v1/sessions").json()
+    assert s["qr_payload"]["liveness"]["min_snr_db"] == 3.0
+    assert s["qr_payload"]["base_url"].startswith("http")
+
+
+def test_m2_app_auth_pass_and_no_pulse(client):
+    phone = Phone(client)
+    s = client.post("/api/v1/sessions").json()
+    with client.websocket_connect(f"/api/v1/ws/{s['session_id']}") as ws:
+        ws.receive_json()
+        assert phone.submit(m2_auth_payload(s)).json()["status"] == "ACCESS_GRANTED"
+        assert ws.receive_json()["event"] == "ACCESS_GRANTED"
+
+    # 30 s timeout without a stable pulse (photo) → the app reports liveness_passed=false
+    s = client.post("/api/v1/sessions").json()
+    with client.websocket_connect(f"/api/v1/ws/{s['session_id']}") as ws:
+        ws.receive_json()
+        r = phone.submit(m2_auth_payload(s, bpm=0.0, snr=-99.0, liveness_passed=False))
+        assert r.json()["status"] == "ACCESS_DENIED" and reason(r) == "NO_PULSE"
+        ev = ws.receive_json()
+        assert ev["event"] == "REJECTED" and ev["reason"].startswith("No pulse detected")
+
+    # A stable reading below the backend's own minimum is still refused
+    s = client.post("/api/v1/sessions").json()
+    assert reason(phone.submit(m2_auth_payload(s, snr=1.0))) == "NO_PULSE"
+
+
+def test_telemetry_always_acks_even_when_throttled(client, officer_headers):
+    s = client.post("/api/v1/sessions").json()
+    sid, nonce = s["session_id"], s["qr_payload"]["nonce"]
+    with client.websocket_connect(f"/api/v1/ws/telemetry/{sid}?nonce={nonce}") as phone_ws:
+        for _ in range(3):  # faster than the 2/s relay limit
+            phone_ws.send_text(json.dumps({"type": "measuring", "bpm": 70}))
+            assert json.loads(phone_ws.receive_text())["ack"] is True
+        phone_ws.send_text(json.dumps({"type": "unknown_type"}))
+        assert json.loads(phone_ws.receive_text()) == {"ack": True, "relayed": False}

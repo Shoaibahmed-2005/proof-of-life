@@ -82,6 +82,9 @@ def build_qr_payload(session: AuthSession, base_url: str) -> dict:
             "type": session.challenge_type,
             "timeout_s": settings.CHALLENGE_TIMEOUT_SECONDS,
         }
+    # The app's stability gate uses the same minimum as the backend check,
+    # so MIN_SNR_DB can be calibrated in .env without rebuilding the app.
+    payload["liveness"] = {"min_snr_db": settings.MIN_SNR_DB}
     return payload
 
 

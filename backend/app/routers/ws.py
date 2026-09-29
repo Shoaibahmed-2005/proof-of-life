@@ -114,17 +114,18 @@ async def session_telemetry_endpoint(websocket: WebSocket, session_id: str, nonc
             except json.JSONDecodeError:
                 continue
             event_name = TELEMETRY_EVENTS.get(str(data.get("type", "")).lower())
-            if event_name is None:
-                continue
+            relay = event_name is not None
             if event_name == "MEASURING":
                 now = time.monotonic()
-                if now - last_measuring < MEASURING_MIN_INTERVAL_S:
-                    continue
-                last_measuring = now
-            await manager.send_to_session(session_id, {
-                "event": event_name, "session_id": session_id, **_clean_telemetry(data),
-            })
-            await websocket.send_text(json.dumps({"ack": True}))
+                relay = now - last_measuring >= MEASURING_MIN_INTERVAL_S  # at most 2/s to the portal
+                if relay:
+                    last_measuring = now
+            if relay:
+                await manager.send_to_session(session_id, {
+                    "event": event_name, "session_id": session_id, **_clean_telemetry(data),
+                })
+            # Always acknowledge, even when a message is throttled or unknown.
+            await websocket.send_text(json.dumps({"ack": True, "relayed": relay}))
     except WebSocketDisconnect:
         pass
     except Exception:

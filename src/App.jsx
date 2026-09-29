@@ -22,10 +22,11 @@ import {
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 
-const API_BASE_URL = 'http://localhost:8080/api/v1';
-const WS_BASE_URL = 'ws://localhost:8080/api/v1/ws';
+// Backend address: set VITE_API_BASE in .env.local to override (e.g. http://192.168.1.20:8000/api/v1).
+const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000/api/v1';
+const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws') + '/ws';
 
-// Number of WebSocket reconnect attempts before giving up and entering standalone mode.
+// Number of WebSocket reconnect attempts before giving up.
 const WS_MAX_RETRIES = 3;
 // Heartbeat interval in ms — keeps the connection alive through proxies / NAT.
 const WS_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -38,7 +39,10 @@ export default function App() {
   const [wsError, setWsError] = useState('');
   const [authData, setAuthData] = useState(null);
   const [countdown, setCountdown] = useState(300);
-  const [isStandalone, setIsStandalone] = useState(false);
+  const [qrPayload, setQrPayload] = useState(null);   // what the phone scans (backend qr_payload)
+  const [liveScan, setLiveScan] = useState(null);     // MEASURING / SCAN_STARTED events from the phone
+  const [rejection, setRejection] = useState(null);   // REJECTED event: { reason, reasonCode }
+  const [sessionError, setSessionError] = useState('');
   const [sessionExpired, setSessionExpired] = useState(false);
 
   const wsRef = useRef(null);
@@ -115,7 +119,6 @@ export default function App() {
         console.log('[WebSocket] Connection opened for session:', id);
         retryCountRef.current = 0;
         setWsStatus('connected');
-        setIsStandalone(false);
         startHeartbeat(ws);
       };
 
@@ -126,6 +129,15 @@ export default function App() {
 
           if (data.event === 'CONNECTED') {
             setWsStatus('connected');
+          } else if (data.event === 'SCAN_STARTED') {
+            setLiveScan({ started: true });
+          } else if (data.event === 'MEASURING' || data.event === 'STABLE_READING') {
+            setLiveScan({ started: true, bpm: data.bpm, snr: data.snr, progress: data.progress,
+                          stable: data.stable || data.event === 'STABLE_READING' });
+          } else if (data.event === 'FACE_LOST') {
+            setLiveScan((prev) => ({ ...(prev || {}), faceLost: true }));
+          } else if (data.event === 'REJECTED') {
+            setRejection({ reason: data.reason || 'Verification failed', reasonCode: data.reason_code });
           } else if (data.event === 'ACCESS_GRANTED') {
             console.log('[WebSocket] Access granted!', data);
             setAuthData({
@@ -162,16 +174,14 @@ export default function App() {
           setWsStatus('connecting');
           retryTimeoutRef.current = setTimeout(() => connectWebSocket(id, attempt + 1), backoffMs);
         } else {
-          console.warn('[WebSocket] Max retries reached — falling back to standalone mode');
+          console.warn('[WebSocket] Max retries reached');
           setWsStatus('error');
-          setWsError('Could not reach backend. Standalone simulation mode active.');
-          setIsStandalone(true);
+          setWsError('Lost the live connection to the backend. Refresh the QR code to try again.');
         }
       };
     } catch (err) {
       console.error('[WebSocket] Instantiation failed:', err);
       setWsStatus('error');
-      setIsStandalone(true);
     }
   }, [startHeartbeat]);
 
@@ -181,7 +191,10 @@ export default function App() {
     retryCountRef.current = 0;
     setLoading(true);
     setWsError('');
+    setSessionError('');
     setSessionExpired(false);
+    setLiveScan(null);
+    setRejection(null);
 
     try {
       const response = await fetch(`${API_BASE_URL}/sessions`, {
@@ -193,6 +206,7 @@ export default function App() {
         const data = await response.json();
         const activeSessionId = data.session_id;
         setSessionId(activeSessionId);
+        setQrPayload(data.qr_payload || { session_id: activeSessionId });
         setAppStep(2);
         setLoading(false);
         connectWebSocket(activeSessionId);
@@ -200,13 +214,9 @@ export default function App() {
         throw new Error(`Server returned HTTP ${response.status}`);
       }
     } catch (error) {
-      console.warn('[Session API] Fallback to standalone session:', error.message);
-      const fallbackId = 'SENTINEL-IND-' + Math.random().toString(36).substring(2, 9).toUpperCase();
-      setSessionId(fallbackId);
-      setIsStandalone(true);
-      setAppStep(2);
+      console.error('[Session API] Could not create a session:', error.message);
+      setSessionError(`Cannot reach the backend at ${API_BASE_URL}. Start it with: uvicorn app.main:app --host 0.0.0.0 --port 8000`);
       setLoading(false);
-      connectWebSocket(fallbackId);
     }
   }, [closeAll, connectWebSocket]);
 
@@ -214,74 +224,15 @@ export default function App() {
     startLoginFlow();
   }, [startLoginFlow]);
 
-  // ── Simulation trigger (DEV / DEMO ONLY) ────────────────────────
-  // This sends a mock payload that uses Math.random()-based mock signatures
-  // which will ALWAYS fail real ECDSA verification on the backend.
-  // Remove or gate this behind a dev flag before production deployment.
-  /* SIMULATION ONLY — NOT FOR PRODUCTION */
-  const simulateMobileApproval = useCallback(async () => {
-    setLoading(true);
-
-    try {
-      const mockBpm = Math.floor(Math.random() * (95 - 65 + 1)) + 65;
-      const verifyPayload = {
-        payload: btoa(JSON.stringify({
-          session_id: sessionId,
-          bpm: mockBpm,
-          timestamp: new Date().toISOString(),
-          device_id: 'Pixel 7 Pro (Titan M2)',
-          snr: 5.8,
-          variance: 1.2
-        })),
-        /* mock_ecdsa — will fail real signature verification on the backend */
-        signature: btoa('mock_ecdsa_signature_' + Math.random()),
-        public_key: btoa('mock_public_key_' + Math.random())
-      };
-
-      const response = await fetch(`${API_BASE_URL}/auth/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(verifyPayload)
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        if (result.status === 'ACCESS_GRANTED') {
-          setAuthData({
-            bpm: mockBpm,
-            deviceId: 'Pixel 7 Pro (Titan M2)',
-            grantedAt: new Date().toISOString()
-          });
-          setTimeout(() => {
-            setLoading(false);
-            setAppStep(3);
-          }, 600);
-          return;
-        }
-      }
-    } catch (err) {
-      console.log('[Simulation] Backend verify endpoint unreachable — standalone fallback:', err.message);
-    }
-
-    // Standalone simulation fallback
-    setTimeout(() => {
-      setLoading(false);
-      setAuthData({
-        bpm: 72,
-        deviceId: 'Pixel 7 (Titan M2 Enclave)',
-        grantedAt: new Date().toISOString()
-      });
-      setAppStep(3);
-    }, 1000);
-  }, [sessionId]);
-
   const handleLogout = useCallback(() => {
     closeAll();
     setAppStep(1);
     setSessionId('');
     setAuthData(null);
     setWsStatus('disconnected');
-    setIsStandalone(false);
+    setQrPayload(null);
+    setLiveScan(null);
+    setRejection(null);
     setSessionExpired(false);
   }, [closeAll]);
 
@@ -403,6 +354,9 @@ export default function App() {
                 </>
               )}
             </button>
+            {sessionError && (
+              <p role="alert" style={{ marginTop: '20px', color: '#FCA5A5', fontSize: '14px' }}>{sessionError}</p>
+            )}
           </div>
         )}
 
@@ -454,7 +408,7 @@ export default function App() {
 
               {/* QR Code */}
               <div style={{ background: '#FFFFFF', padding: '24px', display: 'inline-block', borderRadius: '16px', marginBottom: '28px', boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)', border: '4px solid #38BDF8' }}>
-                <QRCodeSVG value={sessionId} size={220} level="H" includeMargin={false} />
+                <QRCodeSVG value={qrPayload ? JSON.stringify(qrPayload) : sessionId} size={260} level="M" includeMargin={false} />
               </div>
 
               {/* WebSocket Status */}
@@ -469,24 +423,32 @@ export default function App() {
                     <AlertCircle style={{ width: '14px', height: '14px' }} />
                     {wsStatus === 'connecting'
                       ? 'Connecting to backend...'
-                      : isStandalone
-                      ? 'Standalone mode active'
-                      : 'WebSocket disconnected'}
+                      : wsError || 'WebSocket disconnected'}
                   </span>
                 )}
               </div>
 
-              {/* Simulation Button (DEV / DEMO ONLY) */}
-              <div style={{ marginBottom: '24px' }}>
-                <button
-                  onClick={simulateMobileApproval}
-                  disabled={loading}
-                  aria-label="Simulate a mobile biometric approval — for demo purposes only"
-                  style={{ background: loading ? '#334155' : '#10B981', color: '#FFF', border: 'none', borderRadius: '10px', padding: '14px 28px', fontSize: '15px', fontWeight: '700', cursor: loading ? 'not-allowed' : 'pointer', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)', transition: 'all 0.2s' }}
-                >
-                  <Smartphone style={{ width: '20px', height: '20px' }} />
-                  {loading ? 'Verifying Titan M2 Signature...' : 'Simulate Mobile Biometric Approval'}
-                </button>
+              {/* Live status from the phone (relayed by the backend) */}
+              <div role="status" aria-live="polite" style={{ marginBottom: '24px', minHeight: '48px' }}>
+                {rejection ? (
+                  <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #EF4444', borderRadius: '12px', padding: '14px 18px', color: '#FCA5A5' }}>
+                    <div style={{ fontWeight: 700, fontSize: '16px', color: '#EF4444', marginBottom: '6px' }}>Rejected</div>
+                    <div style={{ fontSize: '14px' }}>{rejection.reason}</div>
+                    <button onClick={handleRefreshQR} style={{ marginTop: '12px', background: '#0284C7', border: 'none', borderRadius: '8px', padding: '10px 18px', color: '#FFF', fontWeight: 700, cursor: 'pointer' }}>
+                      Try again
+                    </button>
+                  </div>
+                ) : liveScan ? (
+                  <div style={{ fontSize: '15px', color: liveScan.stable ? '#10B981' : '#F8FAFC' }}>
+                    {liveScan.faceLost
+                      ? 'Face lost: please face the camera'
+                      : liveScan.bpm
+                      ? `${liveScan.stable ? 'Pulse steady' : 'Measuring pulse…'} ${Math.round(liveScan.bpm)} BPM · signal ${Number(liveScan.snr).toFixed(1)} dB · ${Math.round((liveScan.progress || 0) * 100)}%`
+                      : 'Phone connected: measuring pulse…'}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '14px', color: '#94A3B8' }}>Waiting for the phone to scan…</div>
+                )}
               </div>
 
               <div style={{ fontSize: '12px', color: '#64748B', wordBreak: 'break-all', borderTop: '1px solid #1E293B', paddingTop: '16px' }}>

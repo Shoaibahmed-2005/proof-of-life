@@ -7,14 +7,17 @@ plugins {
 android {
     namespace = "com.example.sentinelhard"
     compileSdk = 35
+    // Pinned so every machine builds the native code with the same NDK
+    // (see ANDROID_STUDIO_SETUP.md). This is AGP 9.3's default NDK.
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.example.sentinelhard"
         minSdk = 24
         //noinspection OldTargetApi
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0-m2"
 
         externalNativeBuild {
             cmake {
@@ -50,6 +53,7 @@ android {
     }
     buildFeatures {
         compose = true  // viewBinding removed: app is pure Compose, viewBinding was unused
+        buildConfig = true  // BuildConfig.VERSION_NAME is sent as app_version in the signed payload
     }
 }
 

@@ -7,12 +7,19 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
- * Streams rPPG telemetry (BPM, SNR, liveness status) to the FastAPI backend
- * over a persistent WebSocket connection.
+ * Streams scan progress to the backend, which relays it to the portal page
+ * showing the QR code (WS /api/v1/ws/telemetry/{session_id}?nonce=...).
  *
+ * Message types understood by the backend (routers/ws.py TELEMETRY_EVENTS):
+ * scan_started, measuring, stable_reading, challenge_issued, challenge_passed,
+ * challenge_failed, face_lost, multiple_faces.
+ *
+ * Telemetry is best effort: if the socket is down the scan still completes;
+ * the signed result is always sent over HTTP.
  * Thread-safety: OkHttp's WebSocket.send() is thread-safe and non-blocking,
  * so this class can be called directly from the CameraX analyzer thread.
  */
@@ -20,9 +27,6 @@ class TelemetryStreamer {
 
     companion object {
         private const val TAG = "TelemetryStreamer"
-        // Default: Android emulator loopback to host machine.
-        // Replace with your machine's local IP for physical device testing.
-        private const val DEFAULT_URL = "ws://10.0.2.2:8080/api/v1/ws/telemetry"
     }
 
     private var webSocket: WebSocket? = null
@@ -30,75 +34,54 @@ class TelemetryStreamer {
     private var isConnected = false
 
     private val client = OkHttpClient.Builder()
-        .readTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)  // long-lived socket
         .retryOnConnectionFailure(true)
         .build()
 
-    /**
-     * Opens a WebSocket connection to the telemetry server.
-     * Safe to call multiple times — will no-op if already connected.
-     */
-    fun connect(serverUrl: String = DEFAULT_URL) {
-        if (isConnected) return
-
-        val request = Request.Builder().url(serverUrl).build()
+    /** Opens the session's telemetry socket. Safe to call again; reconnects to the new session. */
+    fun connect(baseUrl: String, sessionId: String, nonce: String?) {
+        disconnect()
+        val wsBase = baseUrl.trimEnd('/').replaceFirst(Regex("^http"), "ws")
+        val url = "$wsBase/api/v1/ws/telemetry/$sessionId?nonce=" + URLEncoder.encode(nonce ?: "", "UTF-8")
+        val request = Request.Builder().url(url).build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 isConnected = true
-                Log.i(TAG, "WebSocket connected to $serverUrl")
-            }
-
-            override fun onMessage(ws: WebSocket, text: String) {
-                Log.d(TAG, "Server: $text")
+                Log.i(TAG, "Telemetry connected for session $sessionId")
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "WebSocket closing: $code / $reason")
+                Log.i(TAG, "Telemetry closing: $code / $reason")
                 ws.close(code, reason)
                 isConnected = false
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket error: ${t.message}")
+                Log.w(TAG, "Telemetry socket error: ${t.message}")
                 isConnected = false
             }
         })
     }
 
-    /**
-     * Sends a telemetry payload to the server.
-     * No-ops silently if the WebSocket is not connected.
-     *
-     * @param bpm        Kalman-smoothed heart rate
-     * @param snr        Signal-to-noise ratio from FFT analysis
-     * @param livenessStatus  Liveness tier: 0 = Spoof, 1 = Analyzing, 2 = Human
-     */
-    fun sendTelemetry(bpm: Double, snr: Double, livenessStatus: Int) {
-        if (!isConnected) return
-
+    /** Sends one event. OkHttp queues it until the socket opens; dropped if the socket failed. */
+    fun send(type: String, fields: Map<String, Any?> = emptyMap()) {
+        val ws = webSocket ?: return
         val payload = JSONObject().apply {
-            put("bpm", bpm)
-            put("snr", snr)
-            put("liveness_status", livenessStatus)
-            put("timestamp", System.currentTimeMillis())
+            put("type", type)
+            fields.forEach { (k, v) -> if (v != null) put(k, v) }
         }
-
-        webSocket?.send(payload.toString())
+        ws.send(payload.toString())
     }
 
-    /**
-     * Gracefully closes the WebSocket connection.
-     */
+    /** Gracefully closes the WebSocket connection. */
     fun disconnect() {
-        webSocket?.close(1000, "Session ended")
+        webSocket?.close(1000, "Scan finished")
         webSocket = null
         isConnected = false
     }
 
-    /**
-     * Shuts down the OkHttp client entirely. Call in Activity.onDestroy().
-     */
+    /** Shuts down the OkHttp client entirely. Call in Activity.onDestroy(). */
     fun shutdown() {
         disconnect()
         client.dispatcher.executorService.shutdown()
