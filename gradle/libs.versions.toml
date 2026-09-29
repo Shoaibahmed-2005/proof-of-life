@@ -18,6 +18,9 @@ retrofit = "2.11.0"
 kotlinxSerialization = "1.7.3"
 retrofitKotlinxConverter = "1.0.0"
 okhttpLogging = "4.12.0"
+# LiteRT (TensorFlow Lite runtime) for the MobileFaceNet face embedder. 1.x keeps the
+# org.tensorflow.lite.Interpreter API. Pinned; see MODEL_INFO.md.
+litert = "1.4.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -44,6 +47,7 @@ okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor",
 retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
 retrofit-kotlinx-serialization = { group = "com.jakewharton.retrofit", name = "retrofit2-kotlinx-serialization-converter", version.ref = "retrofitKotlinxConverter" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

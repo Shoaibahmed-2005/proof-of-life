@@ -43,6 +43,9 @@ data class BiometricPayload(
     @SerialName("app_version")
     val appVersion: String? = null,
     val diagnostics: ScanDiagnosticsPayload? = null,
+    /** Set when the app stopped the scan itself, e.g. "MULTIPLE_FACES". */
+    @SerialName("abort_reason")
+    val abortReason: String? = null,
 )
 
 /**

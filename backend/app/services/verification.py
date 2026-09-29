@@ -203,6 +203,11 @@ def _check_consent(db: Session, session: AuthSession, payload: BiometricPayload)
     db.add(session)
 
 
+def _check_abort(payload: BiometricPayload) -> None:
+    if payload.abort_reason == "MULTIPLE_FACES":
+        raise _Reject("MULTIPLE_FACES", "More than one face was in view; only the pensioner may be in front of the camera")
+
+
 def _check_liveness(payload: BiometricPayload) -> None:
     try:
         check_liveness(payload.bpm, payload.snr, bool(payload.liveness_passed))
@@ -270,6 +275,7 @@ def _verify_auth(db: Session, session: AuthSession, payload: BiometricPayload) -
     age = (utcnow() - payload.timestamp).total_seconds()
     if abs(age) > settings.SESSION_EXPIRY_SECONDS:
         raise _Reject("STALE_PAYLOAD", "Payload timestamp is too old")
+    _check_abort(payload)
     if payload.liveness_passed is not None:
         # Current app (Milestone 2+): SNR in dB and the phone's stability verdict.
         _check_liveness(payload)
@@ -304,6 +310,7 @@ def _verify_enrollment(db: Session, session: AuthSession, payload: BiometricPayl
 
     _check_freshness(session, payload)
     _check_consent(db, session, payload)
+    _check_abort(payload)
     _check_liveness(payload)
     _check_challenge(session, payload)
 
@@ -373,6 +380,7 @@ def _verify_life_certificate(db: Session, session: AuthSession, payload: Biometr
 
     _check_freshness(session, payload)
     _check_consent(db, session, payload)
+    _check_abort(payload)
     _check_liveness(payload)
     _check_challenge(session, payload)
 

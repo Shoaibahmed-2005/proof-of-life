@@ -8,7 +8,7 @@
 - [x] **1. Wi-Fi fix.** `backend/run.py` (0.0.0.0), adapter-aware QR address (`app/core/network.py`), startup banner + LAN self-check, LAN CORS, `vite --host`, a network security config, app error reasons, and Wi-Fi setup docs.
 - [x] **2. Scan-speed diagnostics.** On-screen diagnostics toggle (off by default), `SentinelDiag` logcat, per-scan summary stored by the backend, 30 fps request, AE/AWB lock, poor-conditions guidance, a scan-speed comparison test. Also: gate parameters come from the backend `.env` via the QR code, and face-loss tolerance is relaxed (it was 1 s, a likely cause of scans never finishing).
 - [x] **3. M7 portal**, finished from the uncommitted files in `src/` (Hindi labels to be checked by a native speaker).
-- [ ] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
+- [x] **4. M3:** face box, one-face rule, embeddings (the model download was **approved**: `mobilefacenet.tflite` from hugocornellier/face_detection_tflite, Apache-2.0; LiteRT `com.google.ai.edge.litert:litert:1.4.2`), template averaging.
 - [ ] **5. M4:** random challenge, extended signed payload, 4 app screens per DESIGN.md.
 - [ ] **6. M8:** docs, `DEMO_SCRIPT.md`, end-to-end run with the simulator, and one combined `TESTING_CHECKLIST.md`.
 
@@ -27,7 +27,7 @@
 - Don't hand-edit `.graphify/` or `.engram/`. Regenerate the graph with the graphify skill after backend structure changes.
 
 **How to run and test:**
-- **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (71 tests). Serve with `python run.py` (0.0.0.0:8000; prints the phone address). The demo officer is `officer` / `officer123`.
+- **Backend:** `cd backend; .\venv\Scripts\python -m pytest -q` (72 tests). Serve with `python run.py` (0.0.0.0:8000; prints the phone address). The demo officer is `officer` / `officer123`.
 - **Without a phone:** `backend/scripts/simulate_phone.py --qr '<qr json>' --person A` (options: `--no-pulse`, `--challenge-fail`, `--person B`, `--similarity 0.6`).
 - **Clean demo:** `backend/scripts/reset_demo.py --yes --seed`.
 - **Portal:** `npm run dev` (http://localhost:5173) and `npx vite build`.
@@ -539,3 +539,17 @@ The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). Rea
 - the Hindi toggle, the text-size control and the skip link.
 
 **Security detail:** the portal never shows the challenge before the scan, so an attacker can't pick a matching video in advance.
+
+### M3: Face detection, one-face rule, embeddings, template (2026-09-30)
+- **Model:** `app/src/main/assets/mobilefacenet.tflite`, 5,233,552 bytes, SHA-256 `be4bc7cf…`. See `MODEL_INFO.md` for source, licence, provenance caveat, I/O and pre-processing. The app's `MODEL_VERSION` and the backend's `FACE_MODEL_VERSION` are both `mobilefacenet-192-v1`.
+- **Native:**
+  - `face_core.{h,cpp}`: alignment straight from the YUV planes (2.5× eye distance, eyes level, 0.15× offset; RGB [-1,1]) plus sharpness and brightness, and `averageTopK` for the template.
+  - JNI functions `FaceNative.nativeAlignFace` / `nativeBuildTemplate`; CMake adds `face_core.cpp`.
+  - Laptop tests in `tools/rppg/test_face.cpp`: identical crops for rotations 0/90/180/270, tilt removal, centring, eye order, quality measures, top-k averaging.
+- **Kotlin:**
+  - `face/FaceNative.kt`, `face/FaceEmbedder.kt` (LiteRT `Interpreter`, verifies the model's I/O shapes at load), `face/FaceCapture.kt` (quality from pose, size, light and sharpness; template = best 15 of ≥10, probe = best 5 of ≥3).
+  - ML Kit now reports landmarks, classification and tracking. More than one face → the scan stops and a signed `abort_reason=MULTIPLE_FACES` is sent. A change of tracked face → full restart.
+  - The whole-face box is drawn; there's a face-frames count in the diagnostics.
+  - Embeddings are only *logged* in M3; M4 puts them into the payload.
+- **Dependency:** `com.google.ai.edge.litert:litert:1.4.2` (checked: `Interpreter(ByteBuffer, Options)`, `run`, `get{Input,Output}Tensor`, arm64/armv7 native libraries).
+- **Backend:** `abort_reason` (Literal `MULTIPLE_FACES`) → reason `MULTIPLE_FACES`, which doesn't count toward freezing. The portal maps it to the "Measuring pulse" step with advice.

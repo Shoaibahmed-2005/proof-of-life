@@ -23,6 +23,7 @@
 #include <mutex>
 #include <vector>
 
+#include "face_core.h"
 #include "rppg_core.h"
 
 #define LOG_TAG "SentinelHardNative"
@@ -42,6 +43,57 @@ jdoubleArray toJava(JNIEnv* env, const std::vector<double>& values) {
     if (out != nullptr && n > 0) env->SetDoubleArrayRegion(out, 0, n, values.data());
     return out;
 }
+
+rppg::PlaneView planeView(JNIEnv* env, jobject buffer, jint rowStride, jint pixelStride);
+
+}  // namespace
+
+// ── Face (Kotlin: com.example.sentinelhard.face.FaceNative) ─────────────
+
+// Writes the aligned 112×112 RGB crop ([-1, 1], NHWC) into `out` and returns
+// [ok (0/1), sharpness, luma, eye distance in pixels].
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_example_sentinelhard_face_FaceNative_nativeAlignFace(
+        JNIEnv* env, jobject /* thiz */,
+        jobject yBuffer, jobject uBuffer, jobject vBuffer,
+        jint width, jint height,
+        jint yRowStride, jint yPixelStride, jint uvRowStride, jint uvPixelStride,
+        jint rotation, jdouble eyeAx, jdouble eyeAy, jdouble eyeBx, jdouble eyeBy,
+        jfloatArray out) {
+    std::vector<float> crop(face::kTensorLength, 0.0f);
+    const rppg::PlaneView y = planeView(env, yBuffer, yRowStride, yPixelStride);
+    const rppg::PlaneView u = planeView(env, uBuffer, uvRowStride, uvPixelStride);
+    const rppg::PlaneView v = planeView(env, vBuffer, uvRowStride, uvPixelStride);
+    const face::AlignResult r = face::alignFace(y, u, v, width, height, rotation, eyeAx, eyeAy, eyeBx, eyeBy, crop.data());
+    if (r.ok && out != nullptr && env->GetArrayLength(out) >= face::kTensorLength) {
+        env->SetFloatArrayRegion(out, 0, face::kTensorLength, crop.data());
+    }
+    const std::vector<double> result = {r.ok ? 1.0 : 0.0, r.sharpness, r.luma, r.eyeDistance};
+    return toJava(env, result);
+}
+
+// Average of the `k` best embeddings (by quality), L2-normalised.
+// Returns an empty array if fewer than `minCount` embeddings were given.
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_example_sentinelhard_face_FaceNative_nativeBuildTemplate(
+        JNIEnv* env, jobject /* thiz */,
+        jfloatArray embeddings, jint count, jint dim, jfloatArray quality, jint k, jint minCount) {
+    std::vector<float> result;
+    if (embeddings != nullptr && quality != nullptr && count > 0 && dim > 0 &&
+        env->GetArrayLength(embeddings) >= count * dim && env->GetArrayLength(quality) >= count) {
+        std::vector<float> e(static_cast<size_t>(count) * static_cast<size_t>(dim));
+        std::vector<float> q(static_cast<size_t>(count));
+        env->GetFloatArrayRegion(embeddings, 0, count * dim, e.data());
+        env->GetFloatArrayRegion(quality, 0, count, q.data());
+        result = face::averageTopK(e.data(), count, dim, q.data(), k, minCount);
+    }
+    const jsize n = static_cast<jsize>(result.size());
+    jfloatArray out = env->NewFloatArray(n);
+    if (out != nullptr && n > 0) env->SetFloatArrayRegion(out, 0, n, result.data());
+    return out;
+}
+
+namespace {
 
 rppg::PlaneView planeView(JNIEnv* env, jobject buffer, jint rowStride, jint pixelStride) {
     rppg::PlaneView view{nullptr, 0, rowStride, pixelStride};

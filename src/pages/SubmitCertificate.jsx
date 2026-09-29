@@ -13,6 +13,7 @@ const REASON_HELP = {
   CHALLENGE_FAILED: 'Please do the action shown on your phone (for example "Blink twice") when it appears.',
   FACE_MISMATCH: 'The face did not match the registered pensioner. Only the registered pensioner can submit.',
   DEVICE_MISMATCH: 'Please use the phone that was registered with the officer.',
+  MULTIPLE_FACES: 'Only the pensioner may be in front of the camera. Ask others to step away and try again.',
 };
 
 export default function SubmitCertificate() {

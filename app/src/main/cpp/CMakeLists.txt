@@ -15,7 +15,8 @@ find_package(OpenCV REQUIRED)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
         native-lib.cpp
-        rppg_core.cpp)
+        rppg_core.cpp
+        face_core.cpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         ${OpenCV_LIBRARIES}

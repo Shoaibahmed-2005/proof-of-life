@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -72,6 +73,9 @@ import com.example.sentinelhard.models.ScanDiagnosticsPayload
 import com.example.sentinelhard.models.VerifyRequest
 import com.example.sentinelhard.network.ApiClient
 import com.example.sentinelhard.network.QrPayload
+import com.example.sentinelhard.face.FaceCapture
+import com.example.sentinelhard.face.FaceEmbedder
+import com.example.sentinelhard.face.FaceNative
 import com.example.sentinelhard.rppg.FaceRois
 import com.example.sentinelhard.rppg.GateSettings
 import com.example.sentinelhard.rppg.RppgConfig
@@ -81,6 +85,7 @@ import com.example.sentinelhard.rppg.ScanDiagnostics
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -124,6 +129,8 @@ class MainActivity : AppCompatActivity() {
     private val showDiagnostics = mutableStateOf(false)                  // off by default for the demo
     private val diagSnapshotState = mutableStateOf<ScanDiagnostics.Snapshot?>(null)
     private val guidanceState = mutableStateOf<String?>(null)
+    private val faceBoxState = mutableStateOf<RectF?>(null)              // whole face, upright coords
+    private val faceFramesState = mutableIntStateOf(0)                   // good embedding frames so far
 
     // ── Measurement state (camera thread + ML Kit callbacks) ────────────
     @Volatile private var currentRois: IntArray? = null
@@ -141,6 +148,14 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var faceMoving = false
     private var lastFaceCenter: Pair<Float, Float>? = null
 
+    // Face embeddings (Milestone 3)
+    @Volatile private var faceEmbedder: FaceEmbedder? = null
+    private val embedExecutor = Executors.newSingleThreadExecutor()
+    private val faceCapture = FaceCapture()
+    @Volatile private var embedBusy = false
+    @Volatile private var trackedFaceId: Int? = null
+    private var detectionCount = 0
+
     private val cryptoManager = CryptoManager()
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val telemetryStreamer = TelemetryStreamer()
@@ -148,8 +163,11 @@ class MainActivity : AppCompatActivity() {
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)          // eye positions for alignment
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL) // eyes-open (blink challenge)
             .setContourMode(FaceDetectorOptions.CONTOUR_MODE_NONE)
+            .setMinFaceSize(0.15f)
+            .enableTracking()                                                // same face throughout the scan
             .build()
     )
 
@@ -170,6 +188,15 @@ class MainActivity : AppCompatActivity() {
 
         if (OpenCVLoader.initLocal()) {
             Log.i(TAG, "OpenCV loaded successfully!")
+        }
+
+        // Face model: load once, off the UI thread.
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                faceEmbedder = FaceEmbedder(this@MainActivity)
+            } catch (e: Exception) {
+                Log.e(FaceEmbedder.TAG, "Could not load the face model", e)
+            }
         }
 
         // StrongBox key generation can take a few seconds on first launch: keep it off the UI thread.
@@ -278,6 +305,11 @@ class MainActivity : AppCompatActivity() {
         faceWidthFraction = 1.0
         faceMoving = false
         lastFaceCenter = null
+        faceCapture.reset()
+        faceFramesState.intValue = 0
+        faceBoxState.value = null
+        trackedFaceId = null
+        detectionCount = 0
     }
 
     private fun finishScan(result: ScanState.Result) {
@@ -374,6 +406,52 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Every other face detection: align the face straight from the camera planes
+     * (C++), then run MobileFaceNet on the embedding thread. Called from the ML Kit
+     * success listener, while the image is still open.
+     */
+    private fun maybeEmbed(imageProxy: ImageProxy, face: com.google.mlkit.vision.face.Face, rotation: Int, width: Int, height: Int) {
+        detectionCount++
+        val embedder = faceEmbedder ?: return
+        if (detectionCount % 2 != 0 || embedBusy) return
+        val a = face.getLandmark(FaceLandmark.LEFT_EYE)?.position ?: return
+        val b = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position ?: return
+        val planes = imageProxy.planes
+        val crop = FloatArray(FaceNative.TENSOR_LENGTH)
+        val r = FaceNative.nativeAlignFace(
+            planes[0].buffer, planes[1].buffer, planes[2].buffer, width, height,
+            planes[0].rowStride, planes[0].pixelStride, planes[1].rowStride, planes[1].pixelStride,
+            rotation, a.x.toDouble(), a.y.toDouble(), b.x.toDouble(), b.y.toDouble(), crop,
+        )
+        if (r.size < 4 || r[0] < 0.5) return
+        val q = FaceCapture.quality(face.headEulerAngleY, face.headEulerAngleX, face.headEulerAngleZ, r[3], r[2], r[1])
+        if (q <= 0f) return
+        embedBusy = true
+        embedExecutor.execute {
+            try {
+                val started = System.nanoTime()
+                val embedding = embedder.embed(crop)
+                faceCapture.add(embedding, q)
+                faceFramesState.intValue = faceCapture.goodFrames()
+                Log.d(FaceEmbedder.TAG, "embedding #${faceCapture.framesSeen}: q=%.2f sharp=%.0f luma=%.0f eyes=%.0fpx yaw=%.0f pitch=%.0f in %d ms"
+                    .format(q, r[1], r[2], r[3], face.headEulerAngleY, face.headEulerAngleX, (System.nanoTime() - started) / 1_000_000))
+            } catch (e: Exception) {
+                Log.e(FaceEmbedder.TAG, "Embedding failed", e)
+            } finally {
+                embedBusy = false
+            }
+        }
+    }
+
+    /** More than one face in view: stop the scan and report it (signed), so the portal is told too. */
+    private fun onMultipleFaces(state: ScanState.Measuring, count: Int) {
+        if (!submitted.compareAndSet(false, true)) return
+        Log.w(FaceEmbedder.TAG, "$count faces in view: scan stopped")
+        telemetryStreamer.send("multiple_faces", mapOf("message" to "$count faces in view"))
+        runOnUiThread { submitResult(state, rppgState.value, livenessPassed = false, abortReason = "MULTIPLE_FACES") }
+    }
+
     /** Plain-language hint when conditions make the pulse hard to measure. */
     private fun guidanceFor(r: RppgResult, faceVisible: Boolean): String? = when {
         !faceVisible -> "Face the camera"
@@ -437,9 +515,26 @@ class MainActivity : AppCompatActivity() {
         isDetectingFace = true
         detector.process(InputImage.fromMediaImage(mediaImage, rotation))
             .addOnSuccessListener { faces ->
-                // Milestone 3 adds the whole-face box and rejects frames with more than one face.
-                val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }
+                // One face only, at any point of the scan (build-prompt §4.2).
+                if (faces.size > 1) {
+                    onMultipleFaces(state, faces.size)
+                    return@addOnSuccessListener
+                }
+                val face = faces.firstOrNull()
+                // The same tracked face must provide the pulse and the identity: if ML Kit
+                // starts tracking a different face, everything measured so far is discarded.
+                val id = face?.trackingId
+                if (face != null && id != null) {
+                    val previous = trackedFaceId
+                    if (previous != null && previous != id) {
+                        Log.w(FaceEmbedder.TAG, "Tracked face changed ($previous -> $id): restarting the scan")
+                        onFaceLost()
+                    }
+                    trackedFaceId = id
+                }
                 if (face != null) {
+                    faceBoxState.value = RectF(face.boundingBox)
+                    maybeEmbed(imageProxy, face, rotation, width, height)
                     currentRois = FaceRois.sensorRois(face.boundingBox, width, height, rotation)
                     lastFaceSeenSec = t
                     if (firstFaceSec == null) firstFaceSec = t
@@ -481,6 +576,9 @@ class MainActivity : AppCompatActivity() {
         faceVisibleState.value = false
         telemetryStreamer.send("face_lost")
         diagnostics.onFaceLost()
+        faceCapture.reset()
+        faceFramesState.intValue = 0
+        faceBoxState.value = null
         guidanceState.value = "Face the camera"
     }
 
@@ -510,12 +608,16 @@ class MainActivity : AppCompatActivity() {
 
     // ── Signing and submission ──────────────────────────────────────────
 
-    private fun submitResult(state: ScanState.Measuring, result: RppgResult, livenessPassed: Boolean) {
+    private fun submitResult(
+        state: ScanState.Measuring, result: RppgResult, livenessPassed: Boolean, abortReason: String? = null,
+    ) {
         scanState.value = ScanState.Submitting
         lifecycleScope.launch {
             try {
-                val diag = diagnostics.summary(if (livenessPassed) "stable" else "timeout", result)
-                val request = withContext(Dispatchers.Default) { buildSignedRequest(state.qr, result, livenessPassed, diag) }
+                val diag = diagnostics.summary(abortReason ?: if (livenessPassed) "stable" else "timeout", result)
+                val request = withContext(Dispatchers.Default) {
+                    buildSignedRequest(state.qr, result, livenessPassed, diag, abortReason)
+                }
                 val response = ApiClient.service(state.baseUrl).verifyBiometrics(request)
                 val body = response.body()
                 val outcome = when {
@@ -537,7 +639,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildSignedRequest(
         qr: QrPayload, result: RppgResult, livenessPassed: Boolean, diag: ScanDiagnosticsPayload,
+        abortReason: String? = null,
     ): VerifyRequest {
+        // Milestone 3: embeddings are collected on every scan; logged here so the face path
+        // can be checked on the phone. Milestone 4 puts them into the signed payload.
+        val template = faceCapture.buildTemplate()
+        Log.i(FaceEmbedder.TAG, "Face frames: ${faceCapture.goodFrames()} good of ${faceCapture.framesSeen}; " +
+            "template ${if (template != null) "built (${template.size} values)" else "not enough good frames"}")
         val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }.format(Date())
@@ -553,6 +661,7 @@ class MainActivity : AppCompatActivity() {
             framesUsed = result.samplesInWindow,
             appVersion = BuildConfig.VERSION_NAME,
             diagnostics = diag,
+            abortReason = abortReason,
         )
         val payloadJson = Json.encodeToString(BiometricPayload.serializer(), payload)
         if (!cryptoManager.hasKey()) cryptoManager.generateHardwareKey()
@@ -696,6 +805,7 @@ class MainActivity : AppCompatActivity() {
                     DiagLine("light", "%.0f / 255".format(sn.luma))
                     DiagLine("AE lock", if (sn.aeLocked) "yes" else "no")
                     DiagLine("waiting for", sn.gate.label)
+                    DiagLine("face frames", "${faceFramesState.intValue} good")
                 }
             }
         }
@@ -741,11 +851,20 @@ class MainActivity : AppCompatActivity() {
     private fun RoiOverlay() {
         val rois by roiOverlayState
         val img by overlayImageSize
+        val box by faceBoxState
         Canvas(modifier = Modifier.fillMaxSize()) {
             if (rois.isEmpty() || img.width == 0 || img.height == 0) return@Canvas
             val scale = maxOf(size.width / img.width, size.height / img.height)
             val dx = (size.width - img.width * scale) / 2f
             val dy = (size.height - img.height * scale) / 2f
+            box?.let { f ->
+                drawRect(
+                    color = AMBER,
+                    topLeft = Offset(size.width - (dx + f.right * scale), dy + f.top * scale),
+                    size = ComposeSize(f.width() * scale, f.height() * scale),
+                    style = Stroke(width = 6f),
+                )
+            }
             rois.forEach { r ->
                 val left = size.width - (dx + r.right * scale)  // mirror X for the front camera
                 val top = dy + r.top * scale
@@ -763,6 +882,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         telemetryStreamer.shutdown()
         cameraExecutor.shutdown()
+        embedExecutor.shutdown()
+        faceEmbedder?.close()
         detector.close()
     }
 }

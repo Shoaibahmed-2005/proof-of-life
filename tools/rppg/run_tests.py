@@ -54,8 +54,9 @@ def compile_cpp() -> None:
            "-Wall", "-Wextra", "-Wpedantic", "-Wshadow", "-Wconversion", "-Wno-sign-conversion", f"-I{CPP}"]
     if sys.platform == "win32":
         zig[4:4] = ["-target", "x86_64-windows-gnu"]
-    for out, src in [("test_core", HERE / "test_core.cpp"), ("rppg_cli", HERE / "rppg_cli.cpp")]:
-        cmd = zig + [str(CPP / "rppg_core.cpp"), str(src), "-o", str(BUILD / (out + EXE))]
+    for out, src in [("test_core", HERE / "test_core.cpp"), ("rppg_cli", HERE / "rppg_cli.cpp"),
+                     ("test_face", HERE / "test_face.cpp")]:
+        cmd = zig + [str(CPP / "rppg_core.cpp"), str(CPP / "face_core.cpp"), str(src), "-o", str(BUILD / (out + EXE))]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:  # Windows sometimes locks a fresh .exe briefly (antivirus); retry once
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -75,11 +76,12 @@ def compile_cpp() -> None:
 
 
 def run_unit_tests() -> None:
-    r = subprocess.run([str(BUILD / ("test_core" + EXE))], capture_output=True, text=True)
-    for line in r.stdout.splitlines():
-        if "FAIL" in line:
-            print("        " + line.strip())
-    check(r.returncode == 0, "C++ unit tests")
+    for exe, label in (("test_core", "C++ rPPG unit tests"), ("test_face", "C++ face alignment / template tests")):
+        r = subprocess.run([str(BUILD / (exe + EXE))], capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            if "FAIL" in line:
+                print("        " + line.strip())
+        check(r.returncode == 0, label)
 
 
 def check_filters_against_scipy() -> None:

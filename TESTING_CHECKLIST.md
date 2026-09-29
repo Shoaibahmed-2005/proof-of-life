@@ -145,16 +145,21 @@ The readout (and each `SentinelDiag` line) shows: time, camera fps and range, pu
 
 ## 2. Milestone 3: Face detection, same-face box, embeddings
 
+Use **Practice scan** on the portal. Registration and life certificates also need the Milestone 4 challenge, so they are tested in section 3.
+
 | # | Test | Steps | Expected result |
 |---|---|---|---|
-| 3.1 | Build | Section 0, step 3 | Builds. The APK is about 10–15 MB larger, because of the face model. |
-| 3.2 | Face box | Start a scan. | A box is drawn around the **whole face** and **stays aligned** with it on screen as you move. |
-| 3.3 | Skin areas inside the box | Watch the overlay. | The forehead and both cheek areas are drawn **inside** the face box and move with it. |
-| 3.4 | Two faces | Have a second person lean into the frame part-way through. | The scan **aborts** with "More than one face detected". |
-| 3.5 | Face lost | Leave the frame for about 3 s. | The scan pauses or resets and asks you to face the camera. |
-| 3.6 | Embedding runs | Complete a scan with `logcat` running. | `SentinelFace` logs show embeddings being computed every few frames (not every frame) and "template built from N frames" with N between 10 and 20. |
-| 3.7 | Performance | Watch during a scan. | The preview stays smooth. The phone doesn't get noticeably hot within 30 s. |
-| 3.8 | No images saved | After a scan, check *Files* and the app storage (*Settings → Apps → app → Storage*). | No new images. App data stays small. |
+| 3.1 | Build | Section 0, step 3 | Builds. The APK is about **8–10 MB larger** (face model ~5 MB + LiteRT runtime). On app start, `SentinelFace` logs `Loaded mobilefacenet.tflite (5233552 bytes): input [1, 112, 112, 3] output [1, 192]`. |
+| 3.2 | Face box | Start a scan. | An **orange box around the whole face** stays aligned with the face on screen as you move. |
+| 3.3 | Skin areas inside the box | Watch the overlay. | The three green boxes (forehead, both cheeks) sit **inside** the orange face box and move with it. |
+| 3.4 | Two faces | A second person leans into the frame part-way through. | The scan **stops at once**. Phone: "Not verified: More than one face was in view…". Portal: red **Rejected** with the same reason. |
+| 3.5 | Face swap | Person A starts the scan, then moves away while person B moves in within 2 s. | The measurement restarts ("Measuring…" and an empty ring again). `SentinelFace`: `Tracked face changed`. |
+| 3.6 | Face lost | Leave the frame for about 3 s. | Guidance "Face the camera"; the measurement restarts when you return. |
+| 3.7 | Embeddings run | Complete a scan with `logcat` running (section 7.2, tag `SentinelFace`). | Lines `embedding #n: q=… sharp=… luma=… eyes=…px yaw=… pitch=… in N ms`, a few per second (not every frame). At the end: `Face frames: N good of M; template built (192 values)` with **N ≥ 10**. Note the typical `in N ms` value. |
+| 3.8 | Diagnostics readout | Tap Diagnostics during a scan. | The `face frames: N good` count rises during the scan. |
+| 3.9 | Poor pose | Scan while looking clearly sideways, or with the phone far below your face. | Fewer good face frames (the quality filter rejects them). Guidance "Move closer" if the face is small. |
+| 3.10 | Performance | Watch during a scan. | The preview stays smooth, and the diagnostics fps doesn't drop by more than a few frames compared with before. The phone doesn't get hot within 30 s. |
+| 3.11 | No images saved | After a scan, check *Files* / *Photos* and *Settings → Apps → Jeevan Suraksha (SentinelHard) → Storage*. | No new images. App data stays small. |
 
 ---
 

@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     FACE_ANCHOR_MIN: float = 0.55
     # Weight of the new scan when blending into current_template.
     TEMPLATE_BLEND_ALPHA: float = 0.10
-    FACE_MODEL_VERSION: str = "mobilefacenet-v1"
+    FACE_MODEL_VERSION: str = "mobilefacenet-192-v1"  # must match FaceEmbedder.MODEL_VERSION in the app
 
     # ── Pension status rules ────────────────────────────────────────────
     MAX_FAILED_ATTEMPTS: int = 3

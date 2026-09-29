@@ -22,6 +22,7 @@ from sqlmodel import Session, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.core.config import settings  # noqa: E402
 from app.db.database import get_engine, init_db  # noqa: E402
 from app.db.models import (  # noqa: E402
     BiometricTemplate, CertificateStatus, Device, KeyType, LifeCertificate, Officer, Pensioner,
@@ -69,7 +70,7 @@ def seed(force: bool = False) -> int:
             face = person_face(ppo)
             enc = face_match.encrypt_vector(face)
             db.add(BiometricTemplate(pensioner_id=p.id, anchor_template=enc, current_template=enc,
-                                     embedding_dim=len(face), model_version="mobilefacenet-v1"))
+                                     embedding_dim=len(face), model_version=settings.FACE_MODEL_VERSION))
             key = load_key(f"sim-{ppo}")
             der = key.public_key().public_bytes(serialization.Encoding.DER,
                                                 serialization.PublicFormat.SubjectPublicKeyInfo)

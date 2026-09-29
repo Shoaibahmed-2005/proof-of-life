@@ -16,8 +16,8 @@ android {
         minSdk = 24
         //noinspection OldTargetApi
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.1-diag"
+        versionCode = 4
+        versionName = "3.0-face"
 
         externalNativeBuild {
             cmake {
@@ -81,6 +81,7 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.kotlinx.serialization)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.litert)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)

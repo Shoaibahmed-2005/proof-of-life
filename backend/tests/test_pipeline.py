@@ -475,3 +475,25 @@ def test_telemetry_always_acks_even_when_throttled(client, officer_headers):
             assert json.loads(phone_ws.receive_text())["ack"] is True
         phone_ws.send_text(json.dumps({"type": "unknown_type"}))
         assert json.loads(phone_ws.receive_text()) == {"ack": True, "relayed": False}
+
+
+# ── Milestone 3: one face only ──────────────────────────────────────────
+
+def test_multiple_faces_abort_is_rejected_but_not_counted(client, officer_headers):
+    phone = Phone(client)
+    p = register(client, officer_headers, phone, TEMPLATE)
+    for _ in range(4):  # more than MAX_FAILED_ATTEMPTS
+        s = lc(client)
+        r = phone.submit(phone.payload_for(s["qr_payload"], face_embedding=with_cosine(TEMPLATE, 0.95, 3),
+                                           liveness_passed=False, abort_reason="MULTIPLE_FACES"))
+        assert reason(r) == "MULTIPLE_FACES" and "More than one face" in r.json()["reason"]
+    pub = client.get("/api/v1/pensioners/lookup", params={"ppo_number": p["ppo_number"]}).json()
+    assert pub["status"] == "ACTIVE"  # someone walking into the frame must not freeze a pension
+
+    s = client.post("/api/v1/sessions").json()  # practice scan (AUTH) too
+    auth = {"session_id": s["session_id"], "purpose": "AUTH", "nonce": s["qr_payload"]["nonce"],
+            "timestamp": datetime.now(timezone.utc).isoformat(), "device_id": "d", "bpm": 0.0, "snr": -99.0,
+            "liveness_passed": False, "abort_reason": "MULTIPLE_FACES"}
+    assert reason(phone.submit(auth)) == "MULTIPLE_FACES"
+    bad = dict(auth, abort_reason="SOMETHING_ELSE")
+    assert reason(phone.submit(bad)) == "INVALID_PAYLOAD"

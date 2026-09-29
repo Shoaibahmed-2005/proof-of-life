@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -65,6 +65,8 @@ class BiometricPayload(BaseModel):
     key_security_level: Optional[KeyType] = None
     consent: Optional[bool] = None
     diagnostics: Optional[ScanDiagnostics] = None
+    # The app stopped the scan itself (e.g. more than one face in view).
+    abort_reason: Optional[Literal["MULTIPLE_FACES"]] = None
 
     @field_validator("timestamp")
     @classmethod
