@@ -602,3 +602,21 @@ The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). Rea
     - demo expectations updated to the new app's wording.
 - The Graphify backend map was regenerated (639 nodes, 28 communities) and copied to `.graphify/`.
 - The dev DB was reset with seed data (the old data is in `backend/data/backups/`).
+
+### After M8: First Android build, officer "Remove pensioner" (2026-10-03)
+- **Android build confirmed.** Android Studio Rabbit 1 is now installed on this laptop.
+  - Building from the terminal with `JAVA_HOME` = Android Studio's `jbr` gives `./gradlew :app:assembleDebug` **BUILD SUCCESSFUL**. That was the first compile of all the code since M2, with no code changes needed.
+  - `testDebugUnitTest`: all 8 `ChallengeVerifierTest` tests pass.
+  - The APK was installed over wireless debugging on a Samsung Galaxy A34 (SM-A346E; not a Pixel, so expect a TEE key, not StrongBox).
+  - Gradle downloads a JDK 21 for its daemon, because the bundled JBR is 25.
+- **Teammate's first phone run:** registration and the QR flow worked end to end. A scan was rejected with NO_PULSE. The user chose to keep `MIN_SNR_DB=3.0` (the change to 2.5 was not made). In the laptop simulation, photos pass 0% at 2.0–3.0 dB and 8% at 1.0 dB.
+- **Remove pensioner** (officer):
+  - New `PensionerStatus.REMOVED`, `pensioners.remove()` service, and the endpoint `POST /pensioners/{id}/remove {reason}`.
+  - **Erased:** the BiometricTemplate rows (anchor and current) and the Device rows (phone keys).
+  - **Anonymised:** name → "Removed pensioner"; PPO → `REMOVED-<id>` (frees the PPO); service number and bank digits cleared; DID cleared; `pensioner_id` blanked in `scan_diagnostics` and `match_scores.csv`.
+  - **Closed:** pending sessions are expired; UNDER_REVIEW certificates are rejected with `PENSIONER_REMOVED`.
+  - **Kept:** the ledger (hashes only; the removal is a STATUS_CHANGED entry) and the old certificate rows (scores plus a DID-only credential), so the chain still verifies.
+  - Session creation treats removed pensioners as not found. Lists and the treasury hide them; the treasury counts them as `pensioners.removed`.
+  - **Re-registering** the same person creates a new record with a new template; the old face no longer matches (tested).
+  - **Portal:** the record page has a "Remove this pensioner" panel with a reason and a confirmation; a "Removed" badge; and a Records filter option.
+  - Tests: `tests/test_remove_pensioner.py` (75 backend tests).

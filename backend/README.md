@@ -78,9 +78,10 @@ All paths are under `/api/v1`. 🔒 = officer token required (`Authorization: Be
 | `POST` | `/officers/login` | Demo officer login → token |
 | `GET` | `/officers/me` 🔒 | Current officer |
 | `POST` | `/pensioners` 🔒 | Enter a pensioner's details (starts as `PENDING_ENROLLMENT`) |
-| `GET` | `/pensioners` 🔒 | List/search (`q`, `status`) |
+| `GET` | `/pensioners` 🔒 | List/search (`q`, `status`); removed records only with `status=REMOVED` |
 | `GET` | `/pensioners/{id}` 🔒 | Detail: device key type, template info, certificate history |
 | `GET` | `/pensioners/lookup?ppo_number=` | Public status check by pension ID |
+| `POST` | `/pensioners/{id}/remove` 🔒 | `{reason}`: remove a pensioner. Erases the face templates, phone keys and personal details, frees the PPO number for a fresh registration, and records the removal on the ledger (removed records are hidden from lists; `?status=REMOVED` shows them) |
 | `POST` | `/enroll/complete` 🔒 | Approve a captured registration → `ACTIVE` |
 | `GET` | `/reviews` 🔒 | Certificates under review |
 | `POST` | `/reviews/{certificate_id}/decision` 🔒 | `{decision: APPROVE\|REJECT, reason}` |

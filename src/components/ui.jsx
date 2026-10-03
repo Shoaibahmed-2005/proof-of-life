@@ -17,6 +17,7 @@ const BADGES = {
   FROZEN: ['danger', 'Frozen'],
   INVALID: ['danger', 'Tampered'],
   PENDING_ENROLLMENT: ['neutral', 'Pending registration'],
+  REMOVED: ['neutral', 'Removed'],
   NOT_REGISTERED: ['neutral', 'Not registered'],
   PENDING: ['neutral', 'Pending'],
   STRONGBOX: ['success', 'Titan M2 StrongBox'],

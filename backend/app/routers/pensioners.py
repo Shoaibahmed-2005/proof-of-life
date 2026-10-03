@@ -13,7 +13,9 @@ from app.db.models import (
 from app.db.types import utcnow
 from app.schemas.pensioner import (
     CertificateOut, DeviceOut, PensionerCreate, PensionerDetail, PensionerOut, PensionerPublic,
+    RemoveRequest,
 )
+from app.services.connection_manager import manager
 from app.services import pensioners as pensioner_service
 from app.services.entitlement import entitlement_state
 
@@ -65,6 +67,8 @@ def list_pensioners(db: DbSession, officer: CurrentOfficer,
                               Pensioner.service_number.ilike(like)))
     if status_filter:
         stmt = stmt.where(Pensioner.status == status_filter)
+    else:  # removed records are hidden unless asked for (?status=REMOVED)
+        stmt = stmt.where(Pensioner.status != PensionerStatus.REMOVED)
     stmt = stmt.order_by(Pensioner.created_at.desc()).limit(limit)
     return [PensionerOut.model_validate(p) for p in db.exec(stmt).all()]
 
@@ -83,6 +87,25 @@ def lookup(db: DbSession, ppo_number: str = Query(min_length=4)) -> PensionerPub
         entitlement=entitlement_of(pensioner, certs),
         certificates=[CertificateOut.model_validate(c) for c in certs],
     )
+
+
+@router.post("/{pensioner_id}/remove", response_model=PensionerOut,
+             summary="Remove a pensioner: erase face data, device keys and personal details (officer)")
+async def remove_pensioner(pensioner_id: int, body: RemoveRequest, db: DbSession,
+                           officer: CurrentOfficer) -> PensionerOut:
+    pensioner = db.get(Pensioner, pensioner_id)
+    if pensioner is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Pensioner not found")
+    if pensioner.status is PensionerStatus.REMOVED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This pensioner record is already removed")
+    pensioner_service.remove(db, pensioner, officer.id, body.reason.strip())
+    db.refresh(pensioner)
+    await manager.publish(None, {
+        "event": "STATUS_CHANGED", "pensioner_id": pensioner.id,
+        "pension_status": PensionerStatus.REMOVED.value, "reason_code": "OFFICER_REMOVED",
+        "at": utcnow().isoformat(),
+    })
+    return PensionerOut.model_validate(pensioner)
 
 
 @router.get("/{pensioner_id}", response_model=PensionerDetail, summary="Pensioner detail (officer)")

@@ -3,6 +3,7 @@ Pensioner status rules.
 
 ACTIVE ─(MAX_FAILED_ATTEMPTS rejections, or no certificate by the deadline)─► FROZEN
 FROZEN ─(officer approves a life certificate in the review queue)──────────► ACTIVE
+any    ─(officer removes the record)──────────────────────────────────────► REMOVED
 
 A pension is frozen, never cancelled. Every status change is written to the ledger.
 """
@@ -15,7 +16,10 @@ from datetime import date, datetime
 from sqlmodel import Session, select
 
 from app.core.config import settings
-from app.db.models import CertificateStatus, LifeCertificate, Pensioner, PensionerStatus
+from app.db.models import (
+    AuthSession, BiometricTemplate, CertificateStatus, Device, LifeCertificate, Pensioner,
+    PensionerStatus, ScanDiagnostic, SessionStatus,
+)
 from app.db.types import utcnow
 from app.services.ledger import LedgerEvent, ledger
 
@@ -71,6 +75,65 @@ def restore(db: Session, pensioner: Pensioner, officer_id: int, reason: str) -> 
     pensioner.status_reason = f"Restored by officer: {reason}"
     db.add(pensioner)
     db.commit()
+
+
+def remove(db: Session, pensioner: Pensioner, officer_id: int, reason: str) -> dict[str, int]:
+    """
+    Officer removes a pensioner (e.g. a test registration or a record entered by mistake).
+
+    Erased: the face templates (anchor and current), the bound phone keys, and the
+    personal details (name, service number, bank digits, DID). The PPO number is freed,
+    so the same person can be registered again as a NEW record with a new face
+    template; nothing from the old record is reused.
+
+    Kept, because the audit trail needs them and they hold no personal data: the
+    ledger (hashes only), and the old certificate rows (scores and a DID-only
+    credential). Open QR codes stop working and pending reviews are closed. The
+    removal itself is written to the ledger, so the chain stays valid.
+    """
+    erased = {"templates": 0, "devices": 0, "open_sessions": 0, "closed_reviews": 0}
+    for t in db.exec(select(BiometricTemplate).where(BiometricTemplate.pensioner_id == pensioner.id)).all():
+        db.delete(t)
+        erased["templates"] += 1
+    for d in db.exec(select(Device).where(Device.pensioner_id == pensioner.id)).all():
+        db.delete(d)
+        erased["devices"] += 1
+    for s in db.exec(select(AuthSession).where(AuthSession.pensioner_id == pensioner.id)
+                     .where(AuthSession.status == SessionStatus.PENDING)).all():
+        s.status = SessionStatus.EXPIRED
+        s.reason_code = "PENSIONER_REMOVED"
+        s.reason = "The pensioner record was removed"
+        db.add(s)
+        erased["open_sessions"] += 1
+    for c in db.exec(select(LifeCertificate).where(LifeCertificate.pensioner_id == pensioner.id)
+                     .where(LifeCertificate.status == CertificateStatus.UNDER_REVIEW)).all():
+        c.status = CertificateStatus.REJECTED
+        c.reason_code = "PENSIONER_REMOVED"
+        c.reason = "The pensioner record was removed by an officer"
+        c.reviewed_by = officer_id
+        c.reviewed_at = utcnow()
+        db.add(c)
+        erased["closed_reviews"] += 1
+    for diag in db.exec(select(ScanDiagnostic).where(ScanDiagnostic.pensioner_id == pensioner.id)).all():
+        diag.pensioner_id = None
+        db.add(diag)
+
+    pensioner.name = "Removed pensioner"
+    pensioner.ppo_number = f"REMOVED-{pensioner.id}"
+    pensioner.service_number = ""
+    pensioner.bank_last4 = ""
+    pensioner.monthly_pension_amount = 0
+    pensioner.did = None
+    pensioner.failed_attempts = 0
+    set_status(db, pensioner, PensionerStatus.REMOVED, f"Removed by officer: {reason}",
+               "OFFICER_REMOVED", officer_id=officer_id)
+    db.add(pensioner)
+    db.commit()
+
+    from app.services import score_log  # local import: score_log has no DB dependency
+    score_log.forget_pensioner(pensioner.id)
+    logger.info("Pensioner %s removed by officer %s: %s", pensioner.id, officer_id, erased)
+    return erased
 
 
 def deadline_for_year(year: int) -> date:

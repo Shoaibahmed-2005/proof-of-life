@@ -53,7 +53,7 @@ def _resolve_pensioner(db, body: SessionCreate) -> Pensioner:
         pensioner = pensioner_service.get_by_ppo(db, body.ppo_number)
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Enter the pension ID (PPO number)")
-    if pensioner is None:
+    if pensioner is None or pensioner.status is PensionerStatus.REMOVED:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No pensioner found with that pension ID")
     return pensioner
 

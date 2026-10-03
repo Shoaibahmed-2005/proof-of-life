@@ -131,7 +131,7 @@ def test_treasury_summary(client, officer_headers):
         s = new_session(client, "LIFE_CERTIFICATE", ppo_number=p["ppo_number"])
         phone.submit(phone.payload_for(s["qr_payload"], face_embedding=random_unit(900 + i)))
     t = client.get("/api/v1/treasury/summary", headers=officer_headers).json()
-    assert t["pensioners"] == {"total": 2, "active": 0, "frozen": 1, "pending_enrollment": 1}
+    assert t["pensioners"] == {"total": 2, "active": 0, "frozen": 1, "pending_enrollment": 1, "removed": 0}
     assert t["entitlements"]["FROZEN"] == {"count": 1, "monthly_amount": 32000}
     assert t["entitlements"]["NOT_REGISTERED"]["count"] == 1
     assert t["certificates_this_year"] == {"issued": 1, "under_review": 0, "rejected_attempts": 3}

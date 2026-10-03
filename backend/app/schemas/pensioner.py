@@ -160,3 +160,7 @@ class FrozenItem(BaseModel):
 
 class RestoreRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
+
+
+class RemoveRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)

@@ -20,6 +20,27 @@ FIELDS = ["timestamp", "session_id", "pensioner_id", "score", "anchor_score",
 _lock = threading.Lock()
 
 
+def forget_pensioner(pensioner_id: int) -> int:
+    """Blanks the pensioner id on this pensioner's score rows (scores stay for calibration)."""
+    path = settings.DATA_DIR / "match_scores.csv"
+    with _lock:
+        if not path.exists():
+            return 0
+        with path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        changed = 0
+        for r in rows:
+            if r.get("pensioner_id") == str(pensioner_id):
+                r["pensioner_id"] = ""
+                changed += 1
+        if changed:
+            with path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+        return changed
+
+
 def log_score(session_id: str, pensioner_id: int, score: float, anchor_score: float,
               band: str, model_version: str) -> None:
     if not settings.SCORE_LOG_ENABLED:

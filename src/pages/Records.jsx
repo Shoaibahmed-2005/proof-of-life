@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, fmt } from '../api/client';
+import { useToast } from '../app/providers';
 import { PageBanner } from '../components/Shell';
 import { Alert, DataTable, Field, HashText, Loading, StatusBadge } from '../components/ui';
 
@@ -33,6 +34,7 @@ export function Records() {
               <option value="ACTIVE">Active</option>
               <option value="FROZEN">Frozen</option>
               <option value="PENDING_ENROLLMENT">Pending registration</option>
+              <option value="REMOVED">Removed</option>
             </select>
           </div>
           <Link className="btn btn-primary" to="/officer/register">Register pensioner</Link>
@@ -58,6 +60,7 @@ export function RecordDetail() {
   const [p, setP] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => { api(`/pensioners/${id}`).then(setP).catch((e) => setError(e.message)); }, [id]);
+  const removed = p?.status === 'REMOVED';
 
   return (
     <>
@@ -86,6 +89,9 @@ export function RecordDetail() {
                 {p.status === 'FROZEN' && (
                   <p style={{ marginTop: 16, marginBottom: 0 }}><Link className="btn btn-secondary" to="/officer/reviews">Resolve in Review Queue</Link></p>
                 )}
+                {removed && (
+                  <p className="muted" style={{ marginTop: 16, marginBottom: 0 }}>This record was removed: the face template, phone key and personal details were erased. The pension ID can be registered again as a new pensioner.</p>
+                )}
               </section>
               <section className="card" aria-labelledby="security-title">
                 <h2 id="security-title" style={{ fontSize: '1.3rem' }}>Device and identity</h2>
@@ -110,9 +116,62 @@ export function RecordDetail() {
                 { key: 'actions', header: '', render: (c) => (c.credential_hash ? <Link to={`/ledger?verify=${c.id}`} className="link-more">Verify ›</Link> : null) },
               ]} />
             </section>
+            {!removed && <RemovePensioner pensioner={p} />}
           </>
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Officer-only removal (e.g. a test registration or a record entered by mistake).
+ * The backend erases the face template, the phone key and the personal details,
+ * frees the pension ID for a fresh registration, and records the removal on the ledger.
+ */
+function RemovePensioner({ pensioner }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const navigate = useNavigate();
+
+  const remove = async () => {
+    if (reason.trim().length < 3) { setError('Please give a reason, for example “Test registration”.'); return; }
+    setBusy(true);
+    try {
+      await api(`/pensioners/${pensioner.id}/remove`, { method: 'POST', body: { reason: reason.trim() } });
+      toast('Pensioner removed', 'success', `${pensioner.name} (${pensioner.ppo_number})`);
+      navigate('/officer/records');
+    } catch (e) { setError(e.message); setBusy(false); }
+  };
+
+  return (
+    <section className="card" aria-labelledby="remove-title" style={{ borderColor: 'var(--danger)' }}>
+      <h2 id="remove-title" style={{ fontSize: '1.2rem' }}>Remove this pensioner</h2>
+      {!open ? (
+        <>
+          <p className="muted">For a test registration or a record entered by mistake. The person can be registered again afterwards.</p>
+          <button type="button" className="btn btn-secondary" onClick={() => setOpen(true)}>Remove pensioner…</button>
+        </>
+      ) : (
+        <div className="form">
+          <p style={{ margin: 0 }}>This will <strong>permanently erase</strong> for {pensioner.name} ({pensioner.ppo_number}):</p>
+          <ul style={{ margin: 0 }}>
+            <li>the face template (all stored face data),</li>
+            <li>the registered phone key,</li>
+            <li>the name, service number and bank digits.</li>
+          </ul>
+          <p className="muted" style={{ margin: 0 }}>Open QR codes stop working and pending reviews are closed. The audit ledger keeps only hashes, so it stays valid and records this removal. The pension ID becomes free to register again.</p>
+          <Field id="remove-reason" label="Reason for removal" value={reason} onChange={(e) => setReason(e.target.value)}
+            hint="For example: “Test registration” or “Entered with the wrong PPO number”." error={error} />
+          <div className="row">
+            <button type="button" className="btn btn-danger" disabled={busy} onClick={remove}>{busy ? 'Removing…' : 'Remove permanently'}</button>
+            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => { setOpen(false); setError(''); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

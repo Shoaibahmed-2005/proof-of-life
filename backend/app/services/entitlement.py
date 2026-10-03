@@ -33,7 +33,7 @@ class Entitlement(str, Enum):
 
 
 def entitlement_state(pensioner: Pensioner, issued_this_year: bool) -> Entitlement:
-    if pensioner.status is PensionerStatus.PENDING_ENROLLMENT:
+    if pensioner.status in (PensionerStatus.PENDING_ENROLLMENT, PensionerStatus.REMOVED):
         return Entitlement.NOT_REGISTERED
     if pensioner.status is PensionerStatus.FROZEN:
         return Entitlement.FROZEN
@@ -42,7 +42,9 @@ def entitlement_state(pensioner: Pensioner, issued_this_year: bool) -> Entitleme
 
 def treasury_summary(db: Session, year: int | None = None) -> dict[str, Any]:
     year = year or utcnow().year
-    pensioners = db.exec(select(Pensioner).order_by(Pensioner.name)).all()
+    pensioners = db.exec(select(Pensioner).where(Pensioner.status != PensionerStatus.REMOVED)
+                         .order_by(Pensioner.name)).all()
+    removed = len(db.exec(select(Pensioner.id).where(Pensioner.status == PensionerStatus.REMOVED)).all())
     certs = db.exec(select(LifeCertificate).where(LifeCertificate.year == year)).all()
 
     by_pensioner: dict[int, list[LifeCertificate]] = {}
@@ -79,6 +81,7 @@ def treasury_summary(db: Session, year: int | None = None) -> dict[str, Any]:
             "active": status_counts.get(PensionerStatus.ACTIVE.value, 0),
             "frozen": status_counts.get(PensionerStatus.FROZEN.value, 0),
             "pending_enrollment": status_counts.get(PensionerStatus.PENDING_ENROLLMENT.value, 0),
+            "removed": removed,
         },
         "entitlements": entitlements,
         "certificates_this_year": {

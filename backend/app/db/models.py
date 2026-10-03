@@ -30,6 +30,7 @@ class PensionerStatus(str, Enum):
     PENDING_ENROLLMENT = "PENDING_ENROLLMENT"
     ACTIVE = "ACTIVE"
     FROZEN = "FROZEN"
+    REMOVED = "REMOVED"  # officer removed the record: biometric data and personal details erased
 
 
 class CertificateStatus(str, Enum):
