@@ -5,7 +5,7 @@
  */
 export const STRINGS = {
   en: {
-    portalName: 'Jeevan Suraksha',
+    portalName: 'Proof of Life',
     portalSub: 'Pension Life Certificate Portal',
     navHome: 'Home',
     navSubmit: 'Submit Life Certificate',
@@ -33,7 +33,7 @@ export const STRINGS = {
     pensionId: 'Pension ID (PPO number)',
   },
   hi: {
-    portalName: 'जीवन सुरक्षा',
+    portalName: 'Proof of Life',
     portalSub: 'पेंशन जीवन प्रमाण पत्र पोर्टल',
     navHome: 'मुख्य पृष्ठ',
     navSubmit: 'जीवन प्रमाण पत्र जमा करें',

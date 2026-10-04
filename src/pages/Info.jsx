@@ -58,7 +58,7 @@ export function HowItWorks() {
 
 export const FAQ_ITEMS = [
   ['Who needs to submit a life certificate?', 'Every pensioner, once a year, so that the pension continues. The deadline for 2026 is 30 November.'],
-  ['What do I need?', 'The phone you used at registration, with the Jeevan Suraksha app, your pension ID (PPO number), and about one minute in good light.'],
+  ['What do I need?', 'The phone you used at registration, with the Proof of Life app, your pension ID (PPO number), and about one minute in good light.'],
   ['The scan takes long or says "No pulse detected"', 'Sit facing a window or lamp (light on your face, not behind you), hold the phone at eye level about an arm\'s length away and keep still. Try the practice scan to check your phone.'],
   ['My phone says "Can\'t reach the laptop"', <span key="wifi">Your phone and the computer showing the QR code must be on the same Wi-Fi. At a help desk, ask the staff; they may use a phone hotspot. The message lists what was tried and why it failed.</span>],
   ['Can someone else submit my certificate?', 'No. Your face must match the one registered by the officer, it must come from your registered phone, and a live pulse and a random action are required.'],
@@ -130,7 +130,7 @@ export function Contact() {
             <dt>Phone</dt><dd>{HELPLINE_PHONE}</dd>
             <dt>Office hours</dt><dd>Monday–Friday, 9:30 am – 5:30 pm</dd>
           </dl>
-          <p className="demo-note">This is a demonstration portal (SIH 2026). The contact details are placeholders.</p>
+          <p className="demo-note">This is a demonstration portal. The contact details are placeholders.</p>
         </div>
         <div className="center"><HelpChat width={280} /></div>
       </div>

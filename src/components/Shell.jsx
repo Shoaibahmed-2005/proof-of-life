@@ -4,7 +4,7 @@ import { Mail, Phone, Search } from 'lucide-react';
 import { Logo } from './Art';
 import { useAuth, useI18n, useTextSize } from '../app/providers';
 
-export const HELPLINE_EMAIL = 'help@jeevansuraksha.example';
+export const HELPLINE_EMAIL = 'help@proofoflife.example';
 export const HELPLINE_PHONE = '1800-000-0000 (demo)';
 
 function UtilityBar() {
@@ -146,7 +146,7 @@ function Footer() {
         </div>
       </footer>
       <div className="copyright-bar">
-        © 2026 Jeevan Suraksha — a demonstration portal built for Smart India Hackathon 2026 (SIH26125). Not a government website.
+        © 2026 Proof of Life — a demonstration portal. Not a government website.
       </div>
     </>
   );

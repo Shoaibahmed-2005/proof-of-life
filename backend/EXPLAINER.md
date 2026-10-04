@@ -1,4 +1,4 @@
-# Jeevan Suraksha: How the System Works (Concept Guide)
+# Proof of Life: How the System Works (Concept Guide)
 
 This guide explains **what the system does, how the pieces fit together, and the concepts behind it**, so that anyone on the team can present it. It covers the whole project: the Android app, this FastAPI backend and the web portal. For setup and API details see `README.md`; for the demo see `../DEMO_SCRIPT.md`.
 
@@ -8,7 +8,7 @@ This guide explains **what the system does, how the pieces fit together, and the
 
 Every year, each pensioner must prove they are alive (a **life certificate**) or the pension stops. Travelling to an office is hard for elderly and disabled pensioners, and remote checks can be fooled with a photo or a video.
 
-Jeevan Suraksha lets the pensioner do it **at home with their own phone**, and makes three independent checks:
+Proof of Life lets the pensioner do it **at home with their own phone**, and makes three independent checks:
 
 | Check | Question it answers | How |
 |---|---|---|

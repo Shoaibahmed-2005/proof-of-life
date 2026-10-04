@@ -47,7 +47,7 @@ export default function PracticeScan() {
         ) : (
           <div className="stack">
             <ScanPanel session={session} flow={flow} onRefresh={start} instructions={[
-              'Open the Jeevan Suraksha app and tap “Scan QR code”.',
+              'Open the Proof of Life app and tap “Scan QR code”.',
               'Point the back camera at this code.',
               'Hold the phone at eye level and keep still until it says done.',
             ]} />

@@ -90,7 +90,7 @@ export default function Home() {
       <section className="section section--peach" aria-labelledby="about-title">
         <div className="container">
           <h2 id="about-title" className="section-title">About the portal</h2>
-          <p className="section-lead">Every pensioner proves once a year that they are alive, so their pension continues. Jeevan Suraksha lets them do it from home, securely.</p>
+          <p className="section-lead">Every pensioner proves once a year that they are alive, so their pension continues. Proof of Life lets them do it from home, securely.</p>
           <SideInfo
             links={[['How it works', '/how-it-works'], ['Submit a life certificate', '/submit'], ['Check your status', '/status'],
               ['Practice scan', '/practice'], ['Privacy and data use', '/help#privacy'], ['Audit ledger', '/ledger']]}
@@ -98,7 +98,7 @@ export default function Home() {
             art={<ElderAtHome width={200} />}
             moreTo="/how-it-works"
           >
-            <p>Pensions have been paid out long after a pensioner has passed away, using old photos or videos. Jeevan Suraksha checks three things at once: that the person is <strong>alive</strong> (a heartbeat measured by the camera), that they are <strong>the registered pensioner</strong> (a face match), and that the proof comes from <strong>their genuine phone</strong> (a signature from its security chip).</p>
+            <p>Pensions have been paid out long after a pensioner has passed away, using old photos or videos. Proof of Life checks three things at once: that the person is <strong>alive</strong> (a heartbeat measured by the camera), that they are <strong>the registered pensioner</strong> (a face match), and that the proof comes from <strong>their genuine phone</strong> (a signature from its security chip).</p>
           </SideInfo>
         </div>
       </section>
@@ -114,7 +114,7 @@ export default function Home() {
       <section className="section" aria-labelledby="showcase-title">
         <div className="container">
           <h2 id="showcase-title" className="visually-hidden">The app</h2>
-          <Showcase title="Three steps on your phone" text="The Jeevan Suraksha app guides you with large, clear prompts. The officer portal updates the moment you finish." />
+          <Showcase title="Three steps on your phone" text="The Proof of Life app guides you with large, clear prompts. The officer portal updates the moment you finish." />
         </div>
       </section>
 

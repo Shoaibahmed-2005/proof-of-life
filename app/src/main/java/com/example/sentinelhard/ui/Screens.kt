@@ -118,7 +118,7 @@ fun WelcomeScreen(onScan: () -> Unit) {
         Spacer(Modifier.height(24.dp))
         BrandMark()
         Spacer(Modifier.height(20.dp))
-        Text("Jeevan Suraksha", color = Jst.Text, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+        Text("Proof of Life", color = Jst.Text, fontSize = 32.sp, fontWeight = FontWeight.Bold)
         Text("Life certificate from home", color = Jst.TextMuted, fontSize = 20.sp)
         Spacer(Modifier.height(28.dp))
         Column(

@@ -84,7 +84,7 @@ export function QrPanel({ qrPayload, expiresAt, steps, onRefresh, done }) {
             </div>
           </div>
         ) : (
-          <QRCodeSVG value={value} size={260} level="M" marginSize={2} title="Scan this code with the Jeevan Suraksha app" />
+          <QRCodeSVG value={value} size={260} level="M" marginSize={2} title="Scan this code with the Proof of Life app" />
         )}
         {!done && left !== null && (
           <div className={`countdown ${expired ? 'expired' : ''}`} aria-live="off">

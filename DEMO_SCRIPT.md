@@ -1,4 +1,4 @@
-# DEMO_SCRIPT.md: Presenting Jeevan Suraksha (SIH26125)
+# DEMO_SCRIPT.md: Presenting Proof of Life (SIH26125)
 
 About **10 minutes** plus questions. The laptop screen (portal) faces the judges; the phone is in the pensioner's hands. Every result appears **on the phone and on the laptop at the same moment**.
 
@@ -31,7 +31,7 @@ About **10 minutes** plus questions. The laptop screen (portal) faces the judges
 ## The script
 
 ### 0. Opening (30 s)
-> "Every year, millions of pensioners must prove they are alive, or their pension stops. For an 80-year-old veteran that means a trip to an office. Remote options can be fooled with a photo. Jeevan Suraksha lets them do it at home with their phone, and checks three things: a **real pulse**, a **random live action**, and a **1:1 face match**, all signed inside the phone's security chip."
+> "Every year, millions of pensioners must prove they are alive, or their pension stops. For an 80-year-old veteran that means a trip to an office. Remote options can be fooled with a photo. Proof of Life lets them do it at home with their phone, and checks three things: a **real pulse**, a **random live action**, and a **1:1 face match**, all signed inside the phone's security chip."
 
 ### 1. S1: Register A (2 min)
 1. Officer tab → **Register Pensioner**. Enter A's dummy details (name, PPO e.g. `PPO-DEMO-2001`, service number, bank last 4 digits, pension amount) → **Save and continue** → **Show QR code**.

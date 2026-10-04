@@ -77,7 +77,7 @@ export default function SubmitCertificate() {
             <div className="card stack">
               <h2 style={{ fontSize: '1.3rem' }}>What you need</h2>
               <ul>
-                <li>The phone you used when the officer registered you, with the Jeevan Suraksha app.</li>
+                <li>The phone you used when the officer registered you, with the Proof of Life app.</li>
                 <li>Good, even light on your face (face a window or lamp, not with it behind you).</li>
                 <li>About one minute, sitting still.</li>
               </ul>
@@ -92,7 +92,7 @@ export default function SubmitCertificate() {
               <p style={{ fontSize: '1.15rem' }}>Submitting for <strong>{pensioner.name}</strong> ({pensioner.ppo_number}), year {new Date().getFullYear()}.</p>
             )}
             <ScanPanel session={session} flow={flow} onRefresh={() => start()} instructions={[
-              'Open the Jeevan Suraksha app on your registered phone.',
+              'Open the Proof of Life app on your registered phone.',
               'Tap “Scan QR code” and point the back camera at this code.',
               'Hold the phone at eye level and follow the prompts. Keep still until it says done.',
             ]} />

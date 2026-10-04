@@ -60,11 +60,11 @@ PUBLIC_BASE_URL=http://192.168.1.10:8000
 **3. Allow the ports through Windows Firewall.** Easiest: set the Wi-Fi to **Private** (Settings → Network & internet → Wi-Fi → your network → *Private network*). Then, in an **administrator** PowerShell:
 
 ```powershell
-netsh advfirewall firewall add rule name="Jeevan Suraksha backend 8000" dir=in action=allow protocol=TCP localport=8000 profile=private,public
-netsh advfirewall firewall add rule name="Jeevan Suraksha portal 5173" dir=in action=allow protocol=TCP localport=5173 profile=private,public
+netsh advfirewall firewall add rule name="Proof of Life backend 8000" dir=in action=allow protocol=TCP localport=8000 profile=private,public
+netsh advfirewall firewall add rule name="Proof of Life portal 5173" dir=in action=allow protocol=TCP localport=5173 profile=private,public
 ```
 
-Remove them after the event: `netsh advfirewall firewall delete rule name="Jeevan Suraksha backend 8000"` (and the same for 5173).
+Remove them after the event: `netsh advfirewall firewall delete rule name="Proof of Life backend 8000"` (and the same for 5173).
 
 **4. Test from the phone's browser first.** Open `http://<laptop-ip>:8000/api/v1/health` in Chrome on the phone. `{"status":"ok"…}` means the network path works, and any remaining problem is in the app. A spinner then time-out means firewall or Wi-Fi isolation (step 3 or 5).
 

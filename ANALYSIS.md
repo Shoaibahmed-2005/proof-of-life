@@ -620,3 +620,12 @@ The banking demo is replaced (it's kept on the `legacy-bank-portal` branch). Rea
   - **Re-registering** the same person creates a new record with a new template; the old face no longer matches (tested).
   - **Portal:** the record page has a "Remove this pensioner" panel with a reason and a confirmation; a "Removed" badge; and a Records filter option.
   - Tests: `tests/test_remove_pensioner.py` (75 backend tests).
+
+### Product renamed to "Proof of Life" (2026-10-04)
+- The user's product name is **Proof of Life**. "Jeevan Suraksha" was only the brief's example name and is replaced everywhere users see it:
+  - the portal (header via `strings.js`, page texts, the logo label, the browser title, the example email `help@proofoflife.example`);
+  - the app (welcome screen, messages, and the installed name `app_name`);
+  - the backend (`PROJECT_NAME`, the startup banner, the API description) and the docs.
+- Hindi mode keeps the brand untranslated. The SIH mentions were removed from the portal footer, the contact note and the meta description.
+- Kept unchanged (internal only): the Gradle project and package name `SentinelHard` / `com.example.sentinelhard`, the log tags, and the brief documents (`build-prompt.md`, `DESIGN.md`).
+- Remote `proof-of-life` = https://github.com/Shoaibahmed-2005/proof-of-life.git is now master's upstream (the user's repo); `origin` is still the teammate's repo.

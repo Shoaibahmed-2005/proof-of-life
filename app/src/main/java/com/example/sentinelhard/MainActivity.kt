@@ -288,7 +288,7 @@ class MainActivity : AppCompatActivity() {
         if (qr == null) {
             Log.w(TAG, "Not a session QR code: $raw")
             scanState.value = ScanState.Result(ResultKind.FAILURE, "Not a portal QR code",
-                "Please scan the QR code shown on the Jeevan Suraksha portal.")
+                "Please scan the QR code shown on the Proof of Life portal.")
             return
         }
         Log.i(TAG, "QR scanned: session=${qr.sessionId} purpose=${qr.purpose} base_url=${qr.baseUrl} " +

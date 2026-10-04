@@ -91,7 +91,7 @@ object ApiClient {
         val request = Request.Builder().url(baseUrl.trimEnd('/') + API_PATH + "health").build()
         probeClient.newCall(request).execute().use { response ->
             if (response.isSuccessful) ProbeAttempt(baseUrl, true, "OK")
-            else ProbeAttempt(baseUrl, false, "answered HTTP ${response.code} (is this the Jeevan Suraksha backend?)")
+            else ProbeAttempt(baseUrl, false, "answered HTTP ${response.code} (is this the Proof of Life backend?)")
         }
     } catch (e: Exception) {
         ProbeAttempt(baseUrl, false, explain(e, portOf(baseUrl) ?: DEFAULT_PORT))

@@ -1,5 +1,5 @@
 """
-Jeevan Suraksha backend — application entrypoint.
+Proof of Life backend — application entrypoint.
 
 Pension life-certificate system on the IoB liveness engine: sessions and QR
 payloads, verification of Titan M2-signed biometric payloads, pensioner
@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Backend for the Jeevan Suraksha pension life-certificate portal: sessions, "
+    description="Backend for the Proof of Life pension life-certificate portal: sessions, "
                 "Titan M2 signature verification, liveness and face-match decisions, "
                 "officer review, and a hash-chained audit ledger.",
     version="2.0.0",

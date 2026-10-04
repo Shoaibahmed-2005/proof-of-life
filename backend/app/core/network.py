@@ -154,7 +154,7 @@ def lan_ip(max_age_s: float = 60.0) -> str | None:
 def startup_report(port: int, public_base_url: str) -> str:
     """Human-readable summary printed when the backend starts."""
     cands = list_candidates()
-    lines = ["", "=" * 72, "Jeevan Suraksha backend: how phones reach this laptop"]
+    lines = ["", "=" * 72, "Proof of Life backend: how phones reach this laptop"]
     if public_base_url:
         lines.append(f"  QR codes use PUBLIC_BASE_URL = {public_base_url}  (from .env)")
     elif cands:

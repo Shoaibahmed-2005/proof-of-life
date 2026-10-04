@@ -13,7 +13,7 @@ const SKIN = '#E9B48F';
 
 export function Logo({ size = 52 }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="Jeevan Suraksha logo">
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="Proof of Life logo">
       <path d="M32 3 7 12v18c0 16 10.5 27 25 31 14.5-4 25-15 25-31V12L32 3z" fill={O} />
       <path d="M32 9 13 16v14c0 12 8 21 19 24.5C43 51 51 42 51 30V16L32 9z" fill={OD} opacity="0.35" />
       <path d="M14 34h9l4-9 6 17 4-10 3 2h10" fill="none" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />

@@ -92,7 +92,7 @@ Full instructions: `ANDROID_BUILD.md`, section "Wi-Fi setup". In short:
 - Without a stable pulse within 30 s, the app reports "No pulse detected".
 - The backend address comes from the QR code.
 
-The laptop portal is the new Jeevan Suraksha portal (Milestone 7). It shows the phone's live progress and results.
+The laptop portal is the new Proof of Life portal (Milestone 7). It shows the phone's live progress and results.
 
 **Before the first scan:** open the portal (`http://<laptop-ip>:5173`), go to **Help & FAQs → Practice scan** (or `/practice`), tick the consent box, click **Start practice scan**, and scan the QR code on screen.
 
@@ -193,7 +193,7 @@ Use **Practice scan** on the portal. Registration and life certificates also nee
 | 3.8 | Diagnostics readout | Tap Diagnostics during a scan. | The `face frames: N good` count rises during the scan. |
 | 3.9 | Poor pose | Scan while looking clearly sideways, or with the phone far below your face. | Fewer good face frames (the quality filter rejects them). Guidance "Move closer" if the face is small. |
 | 3.10 | Performance | Watch during a scan. | The preview stays smooth, and the diagnostics fps doesn't drop by more than a few frames compared with before. The phone doesn't get hot within 30 s. |
-| 3.11 | No images saved | After a scan, check *Files* / *Photos* and *Settings → Apps → Jeevan Suraksha (SentinelHard) → Storage*. | No new images. App data stays small. |
+| 3.11 | No images saved | After a scan, check *Files* / *Photos* and *Settings → Apps → Proof of Life → Storage*. | No new images. App data stays small. |
 
 ---
 

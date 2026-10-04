@@ -132,7 +132,7 @@ export default function RegisterPensioner() {
         {session && !approved && (
           <div className="stack">
             <ScanPanel session={session} flow={flow} onRefresh={startScan} instructions={[
-              'Pensioner opens the Jeevan Suraksha app on their own phone.',
+              'Pensioner opens the Proof of Life app on their own phone.',
               'Tap “Scan QR code” and point the back camera at this code.',
               'Hold the phone at eye level, follow the prompts and keep still.',
             ]} />

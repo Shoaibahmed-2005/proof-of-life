@@ -1,4 +1,4 @@
-# Jeevan Suraksha Backend (FastAPI)
+# Proof of Life Backend (FastAPI)
 
 Backend for the pension life-certificate system built on the IoB liveness engine. It creates QR sessions, verifies payloads signed inside the phone's **Titan M2** (Android StrongBox, ECDSA P-256 / SHA-256), checks liveness, the random challenge and a 1:1 face match, stores pensioner records, runs the officer review queue, writes a hash-chained audit ledger, and pushes live results to the portal over WebSocket.
 
